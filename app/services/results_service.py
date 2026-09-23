@@ -250,6 +250,7 @@ def list_pipeline_results(
             pipeline_id=pipeline_summary.id,
             pipeline_name=pipeline_summary.name,
             has_batch_features=has_batch,
+            expected_batch_features_file=spec.batch_features.file if spec.batch_features else None,
             per_subject_ids=[ps.id for ps in spec.per_subject],
             has_atlas=_resource_path_if_exists(resources_path, spec.atlas) is not None,
         ))

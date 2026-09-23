@@ -81,6 +81,15 @@ class PipelineResultSummary(BaseModel):
     has_batch_features: bool = Field(
         description="True if the batch feature CSV exists in the project."
     )
+    expected_batch_features_file: str | None = Field(
+        default=None,
+        description=(
+            "Project-relative path where this pipeline's batch feature CSV is expected "
+            "(from the pipeline's results.batch_features.file). Present whenever the "
+            "pipeline declares a batch_features spec, regardless of has_batch_features — "
+            "lets the UI tell the user exactly what file is missing."
+        ),
+    )
     per_subject_ids: list[str] = Field(
         description="IDs of declared per-subject output types."
     )
