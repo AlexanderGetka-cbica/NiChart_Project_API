@@ -32,6 +32,57 @@ class PerSubjectOutput(BaseModel):
     )
 
 
+class FeatureReference(BaseModel):
+    """A literature reference for interpreting an output feature."""
+
+    citation: str = Field(
+        description="Human-readable citation, e.g. 'Davatzikos et al. 2009, Neurobiol Aging'."
+    )
+    doi: str | None = Field(
+        default=None,
+        description="DOI (without the https://doi.org/ prefix), when available.",
+    )
+    url: str | None = Field(
+        default=None, description="Direct URL to the reference, when no DOI is available."
+    )
+
+
+class FeatureDefinition(BaseModel):
+    """Semantic definition of a single output feature column, for interpretation.
+
+    Authored per pipeline in the ``results.batch_features.features`` block of the
+    pipeline YAML. Only columns that need explanation (e.g. opaque names like
+    ``y_score`` or ``prediction``) need an entry; undocumented columns are simply
+    absent from the map.
+    """
+
+    label: str | None = Field(
+        default=None, description="Human-readable display name, e.g. 'Amyloid-positivity score'."
+    )
+    definition: str = Field(
+        description="Plain-language definition of what the feature measures (1–3 sentences)."
+    )
+    units: str | None = Field(
+        default=None, description="Unit string, e.g. 'mm³', 'years', 'logit', 'a.u.'."
+    )
+    direction: str | None = Field(
+        default=None,
+        description="How to read magnitude, e.g. 'higher = more AD-like atrophy'.",
+    )
+    interpretation: str | None = Field(
+        default=None,
+        description="Guidance and caveats for interpreting the value (ranges, thresholds, not-a-diagnosis).",
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Literature search keywords for grounding answers in current research on this feature.",
+    )
+    references: list[FeatureReference] = Field(
+        default_factory=list,
+        description="Curated citations for this feature (each with an optional DOI or URL).",
+    )
+
+
 class BatchFeaturesResult(BaseModel):
     """Summary of the pipeline's batch-level feature CSV."""
 
@@ -43,6 +94,16 @@ class BatchFeaturesResult(BaseModel):
     columns: list[str] = Field(
         default_factory=list,
         description="Feature columns in the CSV (MRID column excluded).",
+    )
+    feature_definitions: dict[str, FeatureDefinition] | None = Field(
+        default=None,
+        description=(
+            "Semantic definitions keyed by feature column name — definition, units, "
+            "direction, interpretation, literature keywords, and curated references. "
+            "Authored in the pipeline YAML. Only documented columns appear here; a "
+            "column absent from this map has no authored definition. Null when the "
+            "pipeline declares no feature definitions."
+        ),
     )
     row_count: int = Field(default=0)
     label_map: dict[str, LabelInfo] | None = Field(

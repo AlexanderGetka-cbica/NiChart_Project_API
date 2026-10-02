@@ -94,6 +94,7 @@ class DockerBackend(JobBackend):
         num_subjects: int = 1,
         user_token: str | None = None,
         extra_readonly_mounts: list[str] | None = None,
+        study_id: str | None = None,  # ignored: acts on the study dir in place
     ) -> DockerJobHandle:
         resolved_params = tool_spec.resolve_params(params)
         command = tool_spec.render_command(resolved_params)

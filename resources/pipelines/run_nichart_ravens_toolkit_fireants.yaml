@@ -1,0 +1,53 @@
+# RAVENS density & MuSIC via RavensToolkit with GPU FireANTs registration.
+# GPU variant of run_nichart_ravens_toolkit.
+
+pipeline_name: RAVENS Density & MuSIC (RavensToolkit, FireANTs/GPU)
+description: |
+  Runs DLMUSE, then RavensToolkit with the GPU FireANTs registration backend:
+  deformably registers each T1 to the iSTAGING template, computes RAVENS GM
+  tissue-density maps, and extracts opNMF/MuSIC regional values. Same outputs as
+  the CPU pipeline, with registration accelerated on the GPU.
+
+categories:
+  - image-processing
+  - abnormality-mapping
+
+requires:
+  - needs_T1
+
+steps:
+  - id: run_dlmuse
+    tool: nichart_dlmuse
+    inputs:
+      t1_img: ${STUDY}/t1
+    outputs:
+      dlmuse_seg: ${STUDY}/dlmuse_seg
+      dlmuse_vol: ${STUDY}/dlmuse_vol
+
+  - id: run_ravens_toolkit_fireants
+    tool: nichart_ravens_toolkit_fireants
+    inputs:
+      t1_img: ${STUDY}/t1
+      dlmuse_seg: ${STUDY}/dlmuse_seg
+    outputs:
+      ravens_out: ${STUDY}/ravens_out
+    params:
+      reg_mode: default
+
+results:
+  batch_features:
+    file: "ravens_out/RAVENS_MUSIC_C64.csv"
+    mrid_column: "MRID"
+    # See resources/pipelines/SCHEMA.md (results -> features); checked by
+    # scripts/check_feature_docs.py. Columns are component_<i>_mean/_sum (MuSIC C64).
+    # TODO: fill in feature definitions.
+    features: {}
+  per_subject:
+    - id: ravens_gm
+      pattern: "ravens_out/{MRID}_Label_GM_RAVENS.nii.gz"
+      type: nifti
+      display_name: "RAVENS GM density"
+    - id: warped
+      pattern: "ravens_out/{MRID}_Warped.nii.gz"
+      type: nifti
+      display_name: "T1 warped to template (RAVENS)"

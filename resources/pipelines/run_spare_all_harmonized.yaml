@@ -59,3 +59,9 @@ results:
   batch_features:
     file: "ml_biomarkers_harmonized/SPARE_ALL.csv"
     mrid_column: "MRID"
+    # Feature interpretation for the LLM / UI. Document each output column here —
+    # see resources/pipelines/SCHEMA.md (results → features). Completeness is
+    # checked by scripts/check_feature_docs.py.
+    # TODO: replace {} with entries — definition (required), units, direction,
+    #       interpretation, keywords, references + DOIs.
+    features: {}

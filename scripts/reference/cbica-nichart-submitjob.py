@@ -1,9 +1,10 @@
 import json
 import os
+import re
 import subprocess
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import boto3
 import jwt
@@ -12,11 +13,22 @@ import yaml
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field, validator
 
+# Allowlist for free-entry string parameters — mirrors the check in the API server.
+# Rejects spaces and all shell metacharacters to prevent command injection in the
+# bash -c wrapper that Batch uses to run tool containers.
+_SAFE_STRING_RE = re.compile(r"^[a-zA-Z0-9._-]{1,256}$")
+
 BATCH_QUEUE = "cbica-nichart-jobqueue-standard"
 BATCH_JOB_DEF = "cbica-nichart-jobdefinition-template1"
 
 S3_BUCKET = "cbica-nichart-staticfiles"
 S3_TOOL_PREFIX = "tools/"
+
+# User data bucket + FSx mount root. The FSx Lustre filesystem is mounted at
+# /fsx, and user data lives under the key prefix fsx/{user_id}/... in the data
+# bucket, so /fsx/fsx/{user_id}/x maps to s3://{S3_DATA_BUCKET}/fsx/{user_id}/x.
+S3_DATA_BUCKET = "cbica-nichart-io"
+FSX_MOUNT_ROOT = "/fsx"
 
 DEFAULT_TOOL_DEFINITION_PATH = Path(__file__).parent.parent.parent.parent / "resources/tools/"
 
@@ -72,6 +84,49 @@ def is_safe_path(base_dir: Union[str, Path], target_path: Union[str, Path]) -> b
     except ValueError:
         return False
 
+
+def fsx_to_s3_uri(fsx_path: Union[str, Path]) -> str:
+    """Map an FSx host path to its S3 URI in the user data bucket.
+
+    /fsx/fsx/{user_id}/{rest}  ->  s3://{S3_DATA_BUCKET}/fsx/{user_id}/{rest}
+    """
+    p = str(fsx_path)
+    prefix = FSX_MOUNT_ROOT.rstrip("/") + "/"  # "/fsx/"
+    if not p.startswith(prefix):
+        raise ValueError(f"Path {p!r} is not under the FSx mount root {FSX_MOUNT_ROOT!r}")
+    rel = p[len(prefix):].rstrip("/")
+    return f"s3://{S3_DATA_BUCKET}/{rel}"
+
+
+# Sidecar image (guaranteed present on the processing instances) used to run the
+# S3<->FSx syncs. It carries the AWS CLI and is launched the SAME way as the tool
+# container (host daemon `docker run -v`), so it shares the tool container's real
+# host-Lustre view. fsx-manager's own Batch-provided FSx bind is a divergent mount
+# namespace (proven by a stat device:inode mismatch vs the host), so an aws s3 sync
+# run inside fsx-manager can neither see the tool's outputs nor write where the
+# tool reads — hence the syncs must run in this sidecar instead.
+SIDECAR_IMAGE = "cbica/aws-fsx-sidecar:06182025"
+
+
+def sidecar_run(user_id: str, inner_cmd: str) -> str:
+    """Wrap a shell command in a host-daemon `docker run` of the FSx sidecar.
+
+    The user's FSx dir is bind-mounted at the same path inside the sidecar, so the
+    absolute /fsx/fsx/... paths used by the sync commands resolve identically.
+    Runs synchronously (no -d), so the caller's `&&` chain waits on it and
+    propagates its exit code — a failed sync fails the whole job. S3 credentials
+    come from the instance role via IMDS (requires the instance metadata hop limit
+    to allow container access).
+
+    NOTE: inner_cmd must not contain single quotes — it is single-quoted for
+    `sh -c` and this whole string is itself embedded in the fsx-manager `bash -c`.
+    """
+    fsx_dir = f"/fsx/fsx/{user_id}"
+    return (
+        f"docker run --rm -v {fsx_dir}:{fsx_dir}:rw "
+        f"--entrypoint sh {SIDECAR_IMAGE} -c '{inner_cmd}'"
+    )
+
 class IOField(BaseModel):
     type: str  # "file" or "directory"
     description: Optional[str] = None
@@ -91,7 +146,10 @@ class ResourceSpec(BaseModel):
 class ParameterSpec(BaseModel):
     type: str  # "int", "float", "bool", "str"
     default: Optional[Union[int, float, bool, str]] = None
+    description: Optional[str] = None
     choices: Optional[List[Union[int, float, str]]] = None
+    min: Optional[float] = None   # numeric types only
+    max: Optional[float] = None   # numeric types only
 
 
 class ToolSpec(BaseModel):
@@ -104,7 +162,16 @@ class ToolSpec(BaseModel):
     container: Dict[str, Union[str, List[str]]]
     parameters: Dict[str, ParameterSpec]
 
-    def validate_params(self, user_params: Dict[str, Union[int, float, bool, str]]) -> Dict[str, Union[int, float, bool, str]]:
+    def validate_params(self, user_params: Dict) -> Dict:
+        """Validate and coerce user-supplied params against the tool spec.
+
+        Security hardening:
+        - Bool is checked before int (bool is a subclass of int in Python).
+        - Numeric values are checked against min/max if declared.
+        - Choices-constrained params are whitelisted explicitly.
+        - Free-entry string params are restricted to [a-zA-Z0-9._-] to prevent
+          command injection in the bash -c Batch wrapper.
+        """
         validated = {}
         for key, spec in self.parameters.items():
             if key in user_params:
@@ -112,21 +179,55 @@ class ToolSpec(BaseModel):
             elif spec.default is not None:
                 value = spec.default
             else:
-                raise ValueError(f"Missing required parameter: {key}")
+                raise ValueError(f"Missing required parameter: '{key}'")
 
-            # Type check
-            if spec.type == "int" and not isinstance(value, int):
-                raise TypeError(f"Parameter {key} must be int")
-            elif spec.type == "float" and not isinstance(value, float):
-                raise TypeError(f"Parameter {key} must be float")
-            elif spec.type == "bool" and not isinstance(value, bool):
-                raise TypeError(f"Parameter {key} must be bool")
-            elif spec.type == "str" and not isinstance(value, str):
-                raise TypeError(f"Parameter {key} must be str")
+            # Type coercion — bool must be checked before int (bool <: int).
+            if spec.type == "bool":
+                if not isinstance(value, bool):
+                    raise TypeError(
+                        f"Parameter '{key}' must be a boolean (true/false), "
+                        f"got {type(value).__name__!r}"
+                    )
+            elif spec.type == "int":
+                if isinstance(value, bool):
+                    raise TypeError(f"Parameter '{key}' must be int, not bool")
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    raise TypeError(f"Parameter '{key}' must be int")
+            elif spec.type == "float":
+                if isinstance(value, bool):
+                    raise TypeError(f"Parameter '{key}' must be float, not bool")
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    raise TypeError(f"Parameter '{key}' must be float")
+            elif spec.type == "str":
+                value = str(value)
 
-            # Choice check
+            # Choices whitelist (all types).
             if spec.choices and value not in spec.choices:
-                raise ValueError(f"Invalid value for {key}. Must be one of {spec.choices}")
+                raise ValueError(
+                    f"Parameter '{key}': {value!r} is not an allowed value. "
+                    f"Must be one of: {spec.choices}"
+                )
+
+            # Numeric range.
+            if spec.type in ("int", "float"):
+                if spec.min is not None and value < spec.min:
+                    raise ValueError(f"Parameter '{key}' must be >= {spec.min}")
+                if spec.max is not None and value > spec.max:
+                    raise ValueError(f"Parameter '{key}' must be <= {spec.max}")
+
+            # String injection guard — applied to free-entry strings only.
+            # This is the primary defence against command injection in bash -c.
+            if spec.type == "str" and not spec.choices:
+                if not _SAFE_STRING_RE.match(value):
+                    raise ValueError(
+                        f"Parameter '{key}': string values must contain only "
+                        f"letters, digits, '.', '_', or '-' (max 256 chars). "
+                        f"Spaces and shell metacharacters are not allowed."
+                    )
 
             validated[key] = value
         return validated
@@ -205,6 +306,55 @@ class ToolSpec(BaseModel):
         print(f"Returning the following docker command: {docker_cmd}")
 
         return docker_cmd
+
+    def generate_down_sync_commands(self, mount_paths: Dict[str, str]) -> List[str]:
+        """Build scoped DOWN-sync (S3 -> FSx) commands for this job's INPUTS.
+
+        Inputs only, NO --delete. Inputs are read-only, so deletion is never
+        wanted, and dropping --delete means a concurrent chunk job can't wipe
+        another chunk's in-flight outputs. DRA auto-import is the primary
+        S3->FSx path; this explicit sync is a determinism backstop guaranteeing
+        inputs are materialised before the tool reads them.
+
+        The UP-sync is deliberately NOT scoped — see the up-sync in
+        lambda_handler. Scoping the up-sync to declared output mounts is fragile:
+        tools that write results outside their exact declared output paths (aux
+        files, logs, nested dirs) were silently not published. The up-sync
+        therefore covers the whole user dir.
+
+        File-typed inputs sync their PARENT directory, since `aws s3 sync`
+        operates on prefixes/directories rather than single objects.
+        """
+        down_dirs = set()
+        out_dirs = set()
+        for label, host_path in mount_paths.items():
+            if label in self.inputs:
+                is_file = self.inputs[label].type == "file"
+                sync_dir = str(Path(host_path).parent) if is_file else str(host_path).rstrip("/")
+                down_dirs.add(sync_dir)
+            elif label in self.outputs:
+                is_file = self.outputs[label].type == "file"
+                out_dirs.add(str(Path(host_path).parent) if is_file else str(host_path).rstrip("/"))
+            else:
+                raise ValueError(f"Mount label {label} not found in tool spec inputs or outputs.")
+
+        # Don't down-sync a path that is also an output (it's being written).
+        down_dirs -= out_dirs
+
+        return [f"aws s3 sync {fsx_to_s3_uri(d)} {d}" for d in sorted(down_dirs)]
+
+    def output_dirs(self, mount_paths: Dict[str, str]) -> List[str]:
+        """Return the host directories the tool's outputs land in (dedup, sorted).
+
+        For a file output this is the parent directory; for a directory output it
+        is the directory itself. Used for post-run diagnostics.
+        """
+        dirs = set()
+        for label, host_path in mount_paths.items():
+            if label in self.outputs:
+                is_file = self.outputs[label].type == "file"
+                dirs.add(str(Path(host_path).parent) if is_file else str(host_path).rstrip("/"))
+        return sorted(dirs)
 
     def get_container_image(self):
         return self.container['image']
@@ -386,6 +536,49 @@ def lambda_handler(event, context):
         # Finalize prefix commands string
         extra_prefix_commands_str = ' && '.join(extra_prefix_commands_list) if extra_prefix_commands_list else 'echo placeholder'
         print(f"Extra prefix commands string: {extra_prefix_commands_str}")
+
+        # ── S3 sync via host-daemon sidecar containers ─────────────────────────
+        # Both syncs run in the FSx sidecar (see sidecar_run), launched the same
+        # way as the tool container so they share its real host-Lustre view. This
+        # is fully explicit S3<->FSx sync in both directions — no dependence on DRA
+        # auto-import/auto-export, so FSx auto-sync can be disabled entirely.
+        #
+        # DOWN: scoped to inputs, no --delete. Runs before the tool so inputs are
+        #       materialised on the shared Lustre the tool container reads.
+        # UP:   whole user dir, no --delete. NOT scoped to declared output mounts
+        #       (tools write results outside their exact declared paths). Gated
+        #       behind && after the tool, so a failed tool run publishes nothing.
+        down_sync_cmds = tool.generate_down_sync_commands(user_mounts)
+        if down_sync_cmds:
+            down_sync_str = sidecar_run(user_id, ' && '.join(down_sync_cmds))
+        else:
+            down_sync_str = 'echo "no inputs to down-sync"'
+
+        # Up-sync inner: list the output dirs from the sidecar's (correct) view for
+        # visibility, then sync the whole user study dir. `; ` (not `&&`) after the `ls`
+        # so the sync's exit code is what the sidecar returns.
+        out_dirs = tool.output_dirs(user_mounts)
+        ls_part = (
+            f'echo "== FSx output dirs (sidecar view) ==" && '
+            f'ls -laR {" ".join(out_dirs)} 2>&1 || true; '
+            if out_dirs else ''
+        )
+        #TODO: Add study/project specific dir (HERE and down-sync??)
+        up_inner = f'{ls_part}aws s3 sync /fsx/fsx/{user_id} s3://{S3_DATA_BUCKET}/fsx/{user_id}/'
+        up_sync_str = sidecar_run(user_id, up_inner)
+
+        print(f"DEBUG: down-sync: {down_sync_str}")
+        print(f"DEBUG: up-sync: {up_sync_str}")
+
+        full_command = (
+            f'docker pull {tool.get_container_image()} '
+            f'&& {down_sync_str} '
+            f'&& {extra_prefix_commands_str} '
+            f'&& {docker_command} '
+            f'&& {up_sync_str}'
+        )
+        print(f"DEBUG: full fsx-manager command: {full_command}")
+
         response = batch.submit_job(
             jobName=f"{tool_name}-{user_id}",
             jobQueue=BATCH_QUEUE,
@@ -400,7 +593,7 @@ def lambda_handler(event, context):
                         'containers': [
                             {
                                 'name': 'fsx-manager',
-                                'command': ['bash', '-c', f'docker pull {tool.get_container_image()} && aws s3 sync s3://cbica-nichart-io/fsx/{user_id} /fsx/fsx/{user_id} --delete && {extra_prefix_commands_str} && {docker_command} && aws s3 sync /fsx/fsx/{user_id} s3://cbica-nichart-io/fsx/{user_id}'],
+                                'command': ['bash', '-c', full_command],
                                 'resourceRequirements': resource_requirements
                             }
                         ]

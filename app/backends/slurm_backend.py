@@ -187,6 +187,7 @@ class SlurmBackend(SingularityBackend):
         num_subjects: int = 1,
         user_token: str | None = None,
         extra_readonly_mounts: list[str] | None = None,
+        study_id: str | None = None,  # ignored: acts on the study dir in place
     ) -> SlurmJobHandle:
         apptainer_argv = self._build_apptainer_argv(tool_spec, mount_paths, params, extra_readonly_mounts)
 

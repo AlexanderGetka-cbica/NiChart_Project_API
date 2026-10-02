@@ -1,0 +1,54 @@
+pipeline_name: Brain Age (Brain2Vec ViT)
+description: |
+  Predicts brain age from T1-weighted MRI using a Vision Transformer fine-tuned on
+  Brain2Vec representations. Produces one predicted brain age (in years) per subject.
+  Uses the ViT brain-age model weights baked into the Brain2Vec image — no
+  user-supplied weights are required.
+
+categories:
+  - image-processing
+  - feature-extraction
+  - brain-age
+
+requires:
+  - needs_T1
+
+steps:
+  - id: run_brain2vec_ba
+    tool: nichart_brain2vec_ba
+    inputs:
+      t1_img: ${STUDY}/t1
+    outputs:
+      out_dir: ${STUDY}/brain2vec_ba
+    params: {}
+
+outputs:
+  download_dirs:
+    - ${STUDY}/brain2vec_ba
+  tabular_output:
+    - ${STUDY}/brain2vec_ba/ViT_BA_Predictions.csv
+
+results:
+  batch_features:
+    file: "brain2vec_ba/ViT_BA_Predictions.csv"
+    mrid_column: "MRID"
+    features:
+      Prediction:
+        label: "Predicted brain age"
+        definition: >
+          Brain age predicted from a T1-weighted MRI by a Vision Transformer
+          fine-tuned on Brain2Vec representations — the model's estimate of the age
+          the brain "looks like", independent of chronological age.
+        units: "years"
+        direction: "higher = older-appearing brain than chronological age"
+        interpretation: >
+          Interpreted against chronological age: the brain-age gap
+          (predicted − chronological) is the quantity of interest; a positive gap
+          suggests accelerated brain aging. A single value is not a diagnosis.
+        keywords:
+          - "brain age"
+          - "brain age gap"
+          - "BrainAGE"
+          - "accelerated brain aging"
+        # TODO: add the Brain2Vec / brain-age reference citation(s) + DOI(s).
+        references: []

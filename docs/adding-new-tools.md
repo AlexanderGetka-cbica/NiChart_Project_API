@@ -158,6 +158,35 @@ results:
 This populates `GET /projects/{id}/results/{pipeline_id}` with column names, row count,
 download path, and unit annotations.
 
+#### Feature definitions (interpretation layer)
+
+Add a `features` block to give each opaque output column a machine-readable meaning.
+This is surfaced to the results API, the UI, and the MCP server, so an invoking LLM
+can explain columns like `y_score` or `prediction` and cite relevant literature
+instead of guessing from the column name:
+
+```yaml
+results:
+  batch_features:
+    file: "my_output/results.csv"
+    mrid_column: "MRID"
+    features:                       # keyed by exact CSV column name; list only
+      y_score:                      # columns that need explanation (sparse).
+        label: "Amyloid-positivity score"
+        definition: "..."           # REQUIRED — plain-language meaning.
+        units: "logit"
+        direction: "higher = more likely amyloid-positive"
+        interpretation: "Not a diagnosis; apply the study threshold."
+        keywords: ["amyloid PET", "Centiloid"]
+        references:
+          - { citation: "Author et al. 2024, Journal", doi: "10.xxxx/xxxxx" }
+```
+
+Segmentation/ROI pipelines that carry a `label_map` (below) document their columns
+that way, so a `features` block is optional there. See `resources/pipelines/SCHEMA.md`
+for the full field reference, and run **`python scripts/check_feature_docs.py`** to see
+which pipelines are missing definitions, keywords, references, or DOIs.
+
 ### Segmentation outputs with atlas correspondence
 
 If your pipeline produces per-region volumes that map to an atlas segmentation, use the
@@ -345,6 +374,7 @@ can be used as a minimal smoke-test pattern that runs without any real imaging d
 - [ ] Output paths are distinct from any related pipeline variant (harmonized/base)
 - [ ] `results` section declared so the UI can display outputs
 - [ ] Unit annotations added to `batch_features` where applicable
+- [ ] Feature definitions authored under `batch_features.features` (definition, keywords, references + DOIs); verify with `python scripts/check_feature_docs.py`
 - [ ] Harmonized variant created and cross-referenced (if applicable)
 - [ ] `resources/docs/<docs_id>/manifest.yaml` created
 - [ ] At least one user-facing markdown section written (`audience: user`)

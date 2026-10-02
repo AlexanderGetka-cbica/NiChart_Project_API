@@ -296,11 +296,17 @@ results:
   batch_features:
     file: "my_output/results.csv"
     mrid_column: "MRID"
+    features:            # Optional: per-column definitions/keywords/references
+      score: {}          #   for interpretation (see resources/pipelines/SCHEMA.md).
   per_subject:
     - id: "segmentation"
       pattern: "my_output/{MRID}_seg.nii.gz"
       type: "segmentation_nifti"
 ```
+
+See `resources/pipelines/SCHEMA.md` for the full `results` schema (units, label
+maps, and the `features` interpretation layer), and `scripts/check_feature_docs.py`
+to audit feature-documentation completeness across pipelines.
 
 `${STUDY}` resolves to `{NICHART_DATA_ROOT}/{user_sub}/{project_name}`.
 

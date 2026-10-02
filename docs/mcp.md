@@ -7,7 +7,15 @@ poll status, and read results — all in natural language.
 
 The server (`app/mcp_server.py`) is a thin **client** of the NiChart REST API,
 like the `nichart` CLI. The host launches it over **stdio**, calls `tools/list`
-to discover the tools, and then issues `tools/call` as the model decides.
+to discover the tools, and then issues `tools/call` as the model decides. It can
+also serve over **Streamable HTTP** (`nichart-mcp --transport http`, endpoint at
+`/mcp`) for connector-based hosts like ChatGPT.
+
+> **Distributing the all-in-one desktop app?** This page covers a native install
+> (absolute path to `nichart-mcp`). For wiring MCP into the user's LLM app from
+> the Docker-based desktop distribution — the `docker exec` launch pattern,
+> per-host setup, success-detection, and the setup-button UX — see
+> [`mcp-desktop-integration.md`](mcp-desktop-integration.md).
 
 ---
 
@@ -121,7 +129,7 @@ loop, and the researcher never touches JSON, the CLI, or the API.
 | `check_readiness(project, pipeline_id)` | Whether a project's data meets a pipeline's needs. |
 | `run_pipeline(pipeline_id, project, t1=…, fl=…, …, participants=…, existing=false, params={}, force=false)` | Create/select a project, upload data **by local path**, verify, and submit. Returns a `run_id`. If not ready and `force` is false, returns `not_ready` with details instead of submitting. |
 | `get_run_status(run_id)` | Current status + per-step progress; `error` on failure. |
-| `get_results(project, pipeline_id)` | Feature-table availability (rows/columns/download path) + per-subject output coverage. |
+| `get_results(project, pipeline_id)` | Feature-table availability (rows/columns/download path) + per-subject output coverage. Documented columns include inline `definitions` — plain-language meaning, units, direction, interpretation caveats, literature `keywords`, and curated `references` (with DOIs, as a starting point) — so the model can explain opaque columns like `y_score` and, using the keywords, find and cite relevant research. The response also carries a `usage` note and the tool docstring spells out how to present the values (by definition not raw name; with units/direction; conveying "research biomarker, not a diagnosis" caveats). |
 
 **Data ingestion is path-based:** imaging arguments are directories/files **on the
 machine running the MCP server**. For a local researcher that's their laptop; on a

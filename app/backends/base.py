@@ -149,6 +149,7 @@ class JobBackend(ABC):
         num_subjects: int = 1,
         user_token: str | None = None,
         extra_readonly_mounts: list[str] | None = None,
+        study_id: str | None = None,
     ) -> JobHandle:
         """
         Submit a containerised tool job and return a handle immediately.
@@ -171,4 +172,10 @@ class JobBackend(ABC):
             Used when chunk input directories contain absolute symlinks into the study
             directory — the study directory must also be mounted so the symlinks resolve
             inside the container.  Batch backend ignores this (FSx is shared across nodes).
+        study_id:
+            Project/study directory name (the ``{project}`` segment of
+            ``/fsx/fsx/{user_sub}/{project}``). Forwarded to the Lambda so the cloud
+            S3<->FSx sync can be scoped to this project instead of the whole user dir.
+            Local backends (docker/singularity/slurm) ignore it — they read/write the
+            study directory in place.
         """

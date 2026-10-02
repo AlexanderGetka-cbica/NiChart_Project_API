@@ -1,0 +1,40 @@
+name: Brain2Vec Brain Age
+description: >
+  Predicts brain age from a T1-weighted MRI using a Vision Transformer fine-tuned
+  on Brain2Vec representations. Turnkey — uses the ViT brain-age weights baked into
+  the image (no user-supplied weights). Produces ViT_BA_Predictions.csv with one
+  row per subject (MRID + Prediction = predicted brain age in years).
+
+github_url: https://github.com/CBICA/Brain2Vec
+
+inputs:
+  t1_img:
+    type: directory
+    description: Directory of T1-weighted MRI scans, one {MRID}.nii.gz per subject.
+
+outputs:
+  out_dir:
+    type: directory
+    description: Output directory containing ViT_BA_Predictions.csv (MRID + Prediction).
+    merge: directory_union_csv_concat
+
+mounts:
+  t1_img:
+    path_in_container: /input/t1
+    mode: ro
+  out_dir:
+    path_in_container: /output
+    mode: rw
+
+parameters: {}
+
+resources:
+  vcpus: 4
+  memory: 6000
+  gpus: 1
+
+time_per_subject_seconds: 15.0
+
+container:
+  image: cbica/nichart_brain2vec:1.0.2-wrapped
+  command: "vit_ba {t1_img} {out_dir}"

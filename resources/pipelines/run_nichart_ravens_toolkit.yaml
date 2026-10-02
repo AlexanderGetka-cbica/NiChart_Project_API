@@ -1,0 +1,57 @@
+# RAVENS tissue-density maps + MuSIC features via RavensToolkit (CPU/ANTs).
+# Replacement for the earlier run_nichart_ravens_fireants pipeline, using the
+# colleague's rewritten RavensToolkit package.
+
+pipeline_name: RAVENS Density & MuSIC (RavensToolkit)
+description: |
+  Runs DLMUSE, then RavensToolkit: deformably registers each T1 to the iSTAGING
+  template, computes RAVENS GM tissue-density maps (Jacobian-modulated), and
+  extracts opNMF/MuSIC regional values. Outputs per-subject RAVENS maps and a
+  batch MuSIC feature table. Registration uses the CPU ANTs backend.
+
+categories:
+  - image-processing
+  - abnormality-mapping
+
+requires:
+  - needs_T1
+
+steps:
+  - id: run_dlmuse
+    tool: nichart_dlmuse
+    inputs:
+      t1_img: ${STUDY}/t1
+    outputs:
+      dlmuse_seg: ${STUDY}/dlmuse_seg
+      dlmuse_vol: ${STUDY}/dlmuse_vol
+
+  - id: run_ravens_toolkit
+    tool: nichart_ravens_toolkit
+    inputs:
+      t1_img: ${STUDY}/t1
+      dlmuse_seg: ${STUDY}/dlmuse_seg
+    outputs:
+      ravens_out: ${STUDY}/ravens_out
+    params:
+      reg_mode: default
+
+results:
+  batch_features:
+    file: "ravens_out/RAVENS_MUSIC_C64.csv"
+    mrid_column: "MRID"
+    # Feature interpretation for the LLM / UI. Document each output column here —
+    # see resources/pipelines/SCHEMA.md (results -> features). Completeness is
+    # checked by scripts/check_feature_docs.py.
+    # TODO: replace {} with entries — definition (required), units, direction,
+    #       interpretation, keywords, references + DOIs.
+    #       (Columns are component_<i>_mean / component_<i>_sum for MuSIC C64.)
+    features: {}
+  per_subject:
+    - id: ravens_gm
+      pattern: "ravens_out/{MRID}_Label_GM_RAVENS.nii.gz"
+      type: nifti
+      display_name: "RAVENS GM density"
+    - id: warped
+      pattern: "ravens_out/{MRID}_Warped.nii.gz"
+      type: nifti
+      display_name: "T1 warped to template (RAVENS)"

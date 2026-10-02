@@ -1,0 +1,49 @@
+# NiChart tool definition for FireANTs subject -> MNI152 registration.
+
+name: FireANTs MNI Registration
+description: >
+  GPU-accelerated registration of each subject image to an MNI152 template using
+  FireANTs (a Rigid -> Affine -> SyN cascade by default). Writes, per subject, a
+  warped image resampled into template space and the estimated transform / SyN
+  warp field. Runs once over the whole input directory.
+
+inputs:
+  moving_img:
+    type: directory
+
+outputs:
+  registered:
+    type: directory
+
+mounts:
+  moving_img:
+    path_in_container: /input/moving
+    mode: ro
+  registered:
+    path_in_container: /output
+    mode: rw
+
+parameters:
+  transform_type:
+    type: str
+    default: syn
+    choices: [rigid, affine, syn]
+    description: >
+      Registration cascade. rigid = Rigid only; affine = Rigid -> Affine;
+      syn = Rigid -> Affine -> SyN (deformable, the default).
+
+resources:
+  vcpus: 4
+  memory: 16000
+  gpus: 1
+
+time_per_subject_seconds: null
+
+container:
+  image: cbica/fireants-wrapped:0.0.1
+  command: >
+    /opt/nichart/run_wrapper.py
+    --moving-dir {moving_img}
+    --output-dir {registered}
+    --template /opt/nichart/templates/MNI152.nii.gz
+    --transform-type {transform_type}

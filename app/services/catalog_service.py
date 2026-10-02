@@ -11,6 +11,7 @@ import yaml
 from fastapi import HTTPException
 
 from app.backends.base import MountSpec, ToolSpec
+from app.models.results import FeatureDefinition
 from app.models.catalog import (
     CentileFeatureMetadataResponse,
     ColumnSpec,
@@ -330,6 +331,8 @@ class BatchFeaturesSpec:
     feature_groups: list[dict] | None = None  # [{name, label_id_range: [lo, hi]}]
     column_units: dict[str, str] | None = None  # per-column unit overrides, keyed by column name
     default_unit: str | None = None             # unit for columns not in column_units
+    # Semantic feature definitions keyed by column name (for LLM/UI interpretation).
+    features: dict[str, "FeatureDefinition"] | None = None
 
 
 @dataclass
@@ -361,6 +364,12 @@ def get_pipeline_results_spec(pipelines_path: Path, pipeline_id: str) -> "Pipeli
     bf_raw = raw.get("batch_features")
     batch_features = None
     if bf_raw:
+        features_raw = bf_raw.get("features")
+        features = (
+            {name: FeatureDefinition(**entry) for name, entry in features_raw.items()}
+            if features_raw
+            else None
+        )
         batch_features = BatchFeaturesSpec(
             file=bf_raw["file"],
             mrid_column=bf_raw.get("mrid_column", "MRID"),
@@ -369,6 +378,7 @@ def get_pipeline_results_spec(pipelines_path: Path, pipeline_id: str) -> "Pipeli
             feature_groups=bf_raw.get("feature_groups"),
             column_units=bf_raw.get("column_units"),
             default_unit=bf_raw.get("default_unit"),
+            features=features,
         )
 
     per_subject = [

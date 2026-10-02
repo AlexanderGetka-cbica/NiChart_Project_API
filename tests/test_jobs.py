@@ -126,8 +126,9 @@ def test_submitted_param_reaches_backend(tmp_path):
 
     class _CapturingBackend(JobBackend):
         async def submit(self, tool_spec, mount_paths, params, num_subjects=1,
-                         user_token=None, extra_readonly_mounts=None):
+                         user_token=None, extra_readonly_mounts=None, study_id=None):
             captured["params"] = dict(params)
+            captured["study_id"] = study_id
             return _CapturingHandle()
 
     app = create_app()

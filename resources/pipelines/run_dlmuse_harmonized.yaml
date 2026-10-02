@@ -49,6 +49,11 @@ results:
   batch_features:
     file: "dlmuse_vol_harmonized/DLMUSE_Volumes.csv"
     mrid_column: "MRID"
+    # `features` is OPTIONAL here: the ROI volume columns are documented via
+    # `label_map` + `column_template` below. Add entries only for non-ROI summary
+    # columns that need explanation. See SCHEMA.md (results → features); checked
+    # by scripts/check_feature_docs.py.
+    features: {}
     label_map: "atlases/muse/muse_mapping_derived.csv"
     column_template: "H_DL_MUSE_Volume_{id}"
     default_unit: "mm³"
