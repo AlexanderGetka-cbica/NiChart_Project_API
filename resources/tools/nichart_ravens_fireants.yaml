@@ -1,0 +1,52 @@
+# NiChart tool: RAVENS abnormality mapping with GPU registration via FireANTs.
+# Direct alternative to nichart_ravens — same outputs, but the internal
+# subject->template deformable registration runs on the GPU (FireANTs) instead of
+# CPU ANTs. Requires the cbica/nichart_ravens:0.0.1-fireants image (built from
+# NiChart_RAVENS/Dockerfile-FireANTS).
+
+name: nichart_ravens_fireants
+description: >
+  Uses T1 scans and DLMUSE segmentations to generate patient-specific regional
+  brain volume abnormality maps via RAVENS, with the subject->template
+  registration accelerated on the GPU using FireANTs (reg_mode=fireants).
+
+inputs:
+  t1_img:
+    type: directory
+  dlmuse_seg:
+    type: directory
+  demog_csv:
+    type: file
+
+outputs:
+  ravens_out:
+    type: directory
+
+mounts:
+  t1_img:
+    path_in_container: /input/t1
+    mode: ro
+  dlmuse_seg:
+    path_in_container: /input/dlmuse_seg
+    mode: ro
+  demog_csv:
+    path_in_container: /input/demog.csv
+    mode: ro
+  ravens_out:
+    path_in_container: /output
+    mode: rw
+
+parameters: {}
+
+resources:
+  vcpus: 4
+  memory: 28000
+  gpus: 1
+
+time_per_subject_seconds: null
+
+container:
+  image: cbica/nichart_ravens:0.0.1-fireants
+  # --reg-mode fireants selects the GPU registration path; --n-jobs 1 because
+  # registration runs on a single GPU (parallel subjects would contend for VRAM).
+  command: --demog-csv {demog_csv} --t1-dir {t1_img} --dlmuse-dir {dlmuse_seg} --output-dir {ravens_out} --reg-mode fireants --n-jobs 1

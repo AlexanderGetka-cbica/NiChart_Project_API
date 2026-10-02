@@ -38,3 +38,12 @@ results:
     file: "brain2vec/Brain2Vec_Embeddings.csv"
     mrid_column: "MRID"
     default_unit: "a.u."
+    # Feature interpretation for the LLM / UI. Document the output columns here —
+    # see resources/pipelines/SCHEMA.md (results → features). Completeness is
+    # checked by scripts/check_feature_docs.py.
+    # NOTE: these are latent embedding dimensions; per-column definitions may not
+    #       be meaningful. Prefer one shared description of what the embedding is
+    #       (and its intended downstream use) over hundreds of per-dim entries.
+    # TODO: replace {} with entries — definition (required), units, direction,
+    #       interpretation, keywords, references + DOIs.
+    features: {}

@@ -40,5 +40,5 @@ time_per_subject_seconds: 15.0   # ~39 s wall time / 3 subjects includes model-l
 #subjects_per_chunk: 10
 
 container:
-  image: cbica/nichart_brain2vec:1.0.1-wrapped
+  image: cbica/nichart_brain2vec:1.0.2-wrapped
   command: "brain2vec {t1_img} {out_csv}"

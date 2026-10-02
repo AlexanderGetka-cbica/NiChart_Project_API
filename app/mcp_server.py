@@ -265,19 +265,53 @@ def get_results(project: str, pipeline_id: str) -> dict:
     Use after a run succeeds. Returns whether the batch-feature CSV is available
     (with row/column counts and a download path) and per-subject output coverage.
 
+    Each documented feature column carries a ``definitions`` entry: a plain-language
+    ``definition``, ``units``, a ``direction`` (how to read magnitude),
+    ``interpretation`` caveats, literature ``keywords``, and curated ``references``
+    (each with an optional ``doi``).
+
+    HOW TO USE THESE VALUES when answering the user:
+    - Refer to each column by its ``definition``/``label``, never the raw column
+      name. Many names are opaque (``y_score``, ``prediction``); the name alone
+      does not tell the user what was measured.
+    - When you state a value, say what it means using ``units`` and ``direction``
+      (e.g. "SPARE-AD = 1.8 — higher values indicate a more AD-like atrophy
+      pattern"), not just the number.
+    - Always convey the ``interpretation`` caveats. These are research-grade
+      imaging biomarkers, not clinical diagnoses; respect stated thresholds and
+      flag near-threshold values as uncertain. Do not tell a user they "have" a
+      disease.
+    - Ground claims in the ``references`` and cite their ``doi`` when you do; treat
+      them as a starting point, and use the ``keywords`` to search for additional,
+      independent literature rather than relying only on what is listed. Do not
+      invent citations or DOIs beyond what is provided or what you can verify.
+    - If a column has no ``definitions`` entry, say it is undocumented rather than
+      guessing its meaning. To download the raw CSV, use ``download_path`` with the
+      files-download endpoint.
+
     Args:
         project: Project name.
         pipeline_id: Pipeline ID.
     """
     r = _api("GET", f"/projects/{project}/results/{pipeline_id}")
     bf = r.get("batch_features") or None
+    defs = bf.get("feature_definitions") if bf else None
+    usage = (
+        "Refer to columns by their definition/label (not the raw name); state each "
+        "value with its units and direction; always convey interpretation caveats "
+        "(research biomarker, not a diagnosis); cite reference DOIs and use keywords "
+        "to find further literature; call a column with no definition undocumented."
+    )
     return {
         "pipeline": r.get("pipeline_name", pipeline_id),
+        "usage": usage if defs else None,
         "batch_features": None if not bf else {
             "available": bf.get("available"),
             "row_count": bf.get("row_count"),
             "column_count": len(bf.get("columns") or []),
             "columns": bf.get("columns"),
+            "column_units": bf.get("column_units"),
+            "definitions": defs,
             "download_path": bf.get("download_path"),
         },
         "per_subject": [
@@ -295,11 +329,15 @@ def get_results(project: str, pipeline_id: str) -> dict:
 _TOOLS = (list_pipelines, check_readiness, run_pipeline, get_run_status, get_results)
 
 
-def _build_server():
-    """Construct the FastMCP server with the tools registered. Requires the MCP SDK."""
+def _build_server(host: str = "127.0.0.1", port: int = 8765):
+    """Construct the FastMCP server with the tools registered. Requires the MCP SDK.
+
+    ``host``/``port`` only matter for the Streamable-HTTP transport; they are
+    ignored under stdio.
+    """
     from mcp.server.fastmcp import FastMCP  # imported lazily so tests/CLI don't need it
 
-    server = FastMCP("NiChart")
+    server = FastMCP("NiChart", host=host, port=port)
     for fn in _TOOLS:
         server.tool()(fn)
     return server
@@ -310,12 +348,37 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="nichart-mcp",
-        description="NiChart MCP server (stdio). Exposes NiChart tools to an MCP host.",
+        description=(
+            "NiChart MCP server. Exposes NiChart tools to an MCP host over stdio "
+            "(default; for hosts that launch a subprocess — Claude Desktop, Claude "
+            "Code, Codex) or Streamable HTTP (for remote/connector hosts — ChatGPT)."
+        ),
     )
     parser.add_argument(
         "--url",
         default=os.environ.get("NICHART_API_URL", "http://localhost:8000"),
         help="Base URL of a running NiChart API (default: %(default)s or $NICHART_API_URL).",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default=os.environ.get("NICHART_MCP_TRANSPORT", "stdio"),
+        help=(
+            "MCP transport. 'stdio' (default) for local hosts that spawn the server; "
+            "'http' (Streamable HTTP, endpoint at /mcp) for connector-based hosts. "
+            "Env: NICHART_MCP_TRANSPORT."
+        ),
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("NICHART_MCP_HOST", "127.0.0.1"),
+        help="Bind host for --transport http (default: %(default)s; keep on loopback unless you add auth). Env: NICHART_MCP_HOST.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("NICHART_MCP_PORT", "8765")),
+        help="Bind port for --transport http (default: %(default)s). Env: NICHART_MCP_PORT.",
     )
     args = parser.parse_args()
 
@@ -323,11 +386,16 @@ def main() -> None:
     _BASE_URL = args.url.rstrip("/")
 
     try:
-        server = _build_server()
+        server = _build_server(host=args.host, port=args.port)
     except ImportError:
         sys.exit("The MCP SDK is not installed. Install it with:  pip install -e '.[mcp]'")
 
-    server.run()  # stdio transport
+    if args.transport == "http":
+        # Streamable HTTP — endpoint at http://{host}:{port}/mcp. Server logs may go
+        # to stdout here, which is fine (this transport does not use stdio for JSON-RPC).
+        server.run(transport="streamable-http")
+    else:
+        server.run()  # stdio transport (JSON-RPC on stdin/stdout; keep stdout clean)
 
 
 if __name__ == "__main__":

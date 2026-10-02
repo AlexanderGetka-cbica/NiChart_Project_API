@@ -1,0 +1,62 @@
+# NiChart tool: RAVENS via RavensToolkit with the GPU FireANTs backend.
+# GPU variant of nichart_ravens_toolkit — same outputs, registration on the GPU.
+# Needs the cbica/ravenstoolkit-wrapped:0.1.0-fireants image (built from the
+# FireANTs base) and a Volta-or-newer GPU.
+
+name: nichart_ravens_toolkit_fireants
+description: >
+  Deformably registers each subject T1 to the iSTAGING template on the GPU
+  (FireANTs) and computes RAVENS tissue-density maps and opNMF/MuSIC regional
+  values. Same outputs as nichart_ravens_toolkit; the Jacobian and mask warping
+  still use ANTs. T1 is skull-stripped with the DLMUSE segmentation.
+
+inputs:
+  t1_img:
+    type: directory
+  dlmuse_seg:
+    type: directory
+
+outputs:
+  ravens_out:
+    type: directory
+
+mounts:
+  t1_img:
+    path_in_container: /input/t1
+    mode: ro
+  dlmuse_seg:
+    path_in_container: /input/seg
+    mode: ro
+  ravens_out:
+    path_in_container: /output
+    mode: rw
+
+parameters:
+  reg_mode:
+    type: str
+    default: default
+    choices: [quick, default, balanced, test]
+    description: >
+      Registration profile. 'default' = full SyN (recommended); 'quick'/'balanced'
+      are faster; 'test' is fast/inaccurate (smoke tests only). The *_script modes
+      are ANTs-only and not offered for the FireANTs backend.
+
+resources:
+  vcpus: 4
+  memory: 16000
+  gpus: 1
+
+time_per_subject_seconds: 180
+
+container:
+  image: cbica/ravenstoolkit-wrapped:0.1.0-fireants
+  command: >
+    /opt/nichart/run_wrapper.py
+    --t1-dir {t1_img}
+    --seg-dir {dlmuse_seg}
+    --output-dir {ravens_out}
+    --labels GM
+    --seg-type dlmuse
+    --reg-backend fireants
+    --reg-mode {reg_mode}
+    --num-components 64

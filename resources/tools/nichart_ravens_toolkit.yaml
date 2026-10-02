@@ -1,0 +1,61 @@
+# NiChart tool: RAVENS tissue-density maps + MuSIC regional features via RavensToolkit.
+# CPU (ANTs backend). Uses the cbica/ravenstoolkit-wrapped image (batch wrapper
+# around the `ravens` CLI). A GPU variant can point at the -fireants base image
+# and pass --reg-backend fireants.
+
+name: nichart_ravens_toolkit
+description: >
+  Deformably registers each subject T1 to the iSTAGING template and computes
+  RAVENS tissue-density maps (Jacobian-modulated warped tissue masks), then
+  derives opNMF/MuSIC regional values. Produces per-subject RAVENS maps and a
+  batch MuSIC feature CSV. T1 is skull-stripped with the DLMUSE segmentation.
+
+inputs:
+  t1_img:
+    type: directory
+  dlmuse_seg:
+    type: directory
+
+outputs:
+  ravens_out:
+    type: directory
+
+mounts:
+  t1_img:
+    path_in_container: /input/t1
+    mode: ro
+  dlmuse_seg:
+    path_in_container: /input/seg
+    mode: ro
+  ravens_out:
+    path_in_container: /output
+    mode: rw
+
+parameters:
+  reg_mode:
+    type: str
+    default: default
+    choices: [quick, default, balanced, test, default_script, quick_script]
+    description: >
+      ANTs registration profile. 'default' = full 4-level SyN (recommended);
+      'quick'/'balanced' are faster; 'test' is fast/inaccurate (smoke tests only).
+
+resources:
+  vcpus: 4
+  memory: 16000
+  gpus: 0
+
+time_per_subject_seconds: 600
+
+container:
+  image: cbica/ravenstoolkit-wrapped:0.1.0
+  command: >
+    /opt/nichart/run_wrapper.py
+    --t1-dir {t1_img}
+    --seg-dir {dlmuse_seg}
+    --output-dir {ravens_out}
+    --labels GM
+    --seg-type dlmuse
+    --reg-backend ants
+    --reg-mode {reg_mode}
+    --num-components 64

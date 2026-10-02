@@ -1,0 +1,35 @@
+# NiChart pipeline: register each T1 to MNI152 with FireANTs (deformable).
+
+pipeline_name: FireANTs MNI Registration
+description: |
+  Registers each subject's T1-weighted image to an MNI152 template using
+  FireANTs GPU registration. By default runs a Rigid -> Affine -> SyN cascade and
+  produces, per subject, a warped image in template space plus the SyN warp
+  field (usable downstream for template-space analyses / RAVENS-style workflows).
+
+categories:
+  - registration
+
+requires:
+  - needs_T1
+
+steps:
+  - id: run_fireants_mni
+    tool: fireants_register_mni
+    inputs:
+      moving_img: ${STUDY}/t1
+    outputs:
+      registered: ${STUDY}/fireants_mni
+    params:
+      transform_type: syn
+
+results:
+  per_subject:
+    - id: warped
+      pattern: "fireants_mni/{MRID}_warped.nii.gz"
+      type: nifti
+      display_name: "Warped to MNI (FireANTs)"
+    - id: warp_field
+      pattern: "fireants_mni/{MRID}_0Warp.nii.gz"
+      type: nifti
+      display_name: "SyN warp field"

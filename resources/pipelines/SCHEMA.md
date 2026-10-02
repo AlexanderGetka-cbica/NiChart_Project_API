@@ -134,6 +134,43 @@ results:
       SomeColumn: "years"
       AnotherColumn: "a.u."
 
+    # Feature definitions — semantic interpretation of output columns, surfaced to
+    # the results API, the UI, and the MCP server (so an invoking LLM can explain
+    # opaque columns like `y_score` or `prediction`). Sparse: list only columns
+    # that need explanation; keyed by exact CSV column name. Columns absent from
+    # this map are simply undocumented. Segmentation/ROI pipelines that carry a
+    # `label_map` (below) document their columns that way instead — a `features`
+    # block is optional there.
+    #
+    # Completeness is enforced by `scripts/check_feature_docs.py`. New pipelines
+    # ship an empty `features: {}` placeholder; fill it in and remove any TODOs.
+    #
+    # Per-column fields:
+    #   definition    REQUIRED — plain-language description (1–3 sentences).
+    #   label         optional — human-readable display name.
+    #   units         optional — e.g. 'mm³', 'years', 'logit', 'a.u.'.
+    #   direction     optional — how to read magnitude ('higher = more X').
+    #   interpretation optional — caveats/thresholds ('not a diagnosis', ...).
+    #   keywords      recommended — literature search terms (list of strings).
+    #   references    recommended — curated citations (see below). A starting
+    #     point for the reader/LLM, not an exhaustive bibliography.
+    #     Each reference: citation (REQUIRED), doi OR url (optional but strongly
+    #     preferred).
+    features:
+      y_score:
+        label: "Amyloid-positivity score"
+        definition: "Model logit; higher values indicate greater likelihood of amyloid positivity."
+        units: "logit"
+        direction: "higher = more likely amyloid-positive"
+        interpretation: "Continuous score, not a diagnosis; apply the study threshold to dichotomize."
+        keywords:
+          - "amyloid PET"
+          - "Centiloid"
+          - "amyloid positivity"
+        references:
+          - citation: "Author et al. YYYY, Journal"   # TODO: real citation
+            doi: "10.xxxx/xxxxx"                       # TODO: real DOI (or use `url:`)
+
     # Segmentation label map — only for pipelines whose features correspond to
     # atlas parcellation labels (e.g. DLMUSE volume outputs).
     label_map: "atlases/<name>/mapping.csv"   # Path relative to resources/.

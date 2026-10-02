@@ -161,12 +161,21 @@ class SingularityBackend(JobBackend):
 
         gpus = (tool_spec.resources or {}).get("gpus", 0)
         gpu_args = ["--nv"] if gpus else []
+
+        # Overlay a throwaway writable tmpfs on the (read-only) container root so
+        # tools that write inside the image — /tmp, $HOME, caches, or hardcoded
+        # in-image paths that aren't bind-mounted — don't fail with "Read-only
+        # file system". Docker's writable root layer masks this; Singularity/
+        # Apptainer mount the container root read-only by default. These writes go
+        # to RAM and are discarded at exit, so real outputs must still land in the
+        # bound output mounts above.
+        base_flags = ["--writable-tmpfs", *gpu_args]
         cmd_tokens = shlex.split(command)
 
         if run_mode == "run":
-            return [self._runner, "run", *gpu_args, *bind_args, str(sif_path), *cmd_tokens]
+            return [self._runner, "run", *base_flags, *bind_args, str(sif_path), *cmd_tokens]
         else:
-            return [self._runner, "exec", *gpu_args, *bind_args, str(sif_path), *cmd_tokens]
+            return [self._runner, "exec", *base_flags, *bind_args, str(sif_path), *cmd_tokens]
 
     async def submit(
         self,
@@ -176,6 +185,7 @@ class SingularityBackend(JobBackend):
         num_subjects: int = 1,
         user_token: str | None = None,
         extra_readonly_mounts: list[str] | None = None,
+        study_id: str | None = None,  # ignored: acts on the study dir in place
     ) -> SingularityJobHandle:
         argv = self._build_apptainer_argv(tool_spec, mount_paths, params, extra_readonly_mounts)
 

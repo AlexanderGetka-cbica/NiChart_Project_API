@@ -140,6 +140,7 @@ class BatchBackend(JobBackend):
         num_subjects: int = 1,
         user_token: str | None = None,
         extra_readonly_mounts: list[str] | None = None,  # ignored: FSx shared across Batch nodes
+        study_id: str | None = None,
     ) -> BatchJobHandle:
         payload = {
             "id_token": user_token or "",
@@ -147,6 +148,7 @@ class BatchBackend(JobBackend):
             "user_mounts": mount_paths,
             "user_params": params,
             "num_subjects": num_subjects,
+            "study_id": study_id or "",
         }
         resp = await asyncio.to_thread(
             self._lambda.invoke,

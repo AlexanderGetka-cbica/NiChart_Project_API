@@ -1066,6 +1066,7 @@ async def run_pipeline_task(
                             num_subjects=len(subs),
                             user_token=user_token,
                             extra_readonly_mounts=[str(study_dir)],
+                            study_id=study_dir.name,
                         )
                         chunk.job_id = h.job_id
                         chunk.submitted_at = datetime.now(timezone.utc)
@@ -1272,6 +1273,7 @@ async def run_pipeline_task(
                     params=merged_params,
                     num_subjects=num_subjects,
                     user_token=user_token,
+                    study_id=study_dir.name,
                 )
             except Exception as e:
                 step.status = "failed"
@@ -1413,6 +1415,7 @@ async def run_direct_steps_task(
                 mount_paths=step_def.mount_paths,
                 params=step_def.params,
                 user_token=user_token,
+                study_id=study_dir.name if study_dir else None,
             )
         except Exception as e:
             step.status = "failed"

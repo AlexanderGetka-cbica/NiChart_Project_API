@@ -1,0 +1,47 @@
+# RAVENS abnormality mapping with GPU registration via FireANTs.
+# Direct alternative to run_nichart_ravens: identical inputs/outputs, but the
+# subject->template deformable registration runs on the GPU (FireANTs) instead of
+# CPU ANTs.
+
+pipeline_name: RAVENS Abnormality Mapping (FireANTs / GPU)
+description: |
+  Generates patient-specific regional brain volume abnormality maps using DLMUSE
+  and RAVENS, with the internal subject-to-template deformable registration
+  accelerated on the GPU via FireANTs. A direct alternative to the CPU RAVENS
+  pipeline with the same outputs.
+
+categories:
+  - image-processing
+  - abnormality-mapping
+
+requires:
+  - needs_T1
+  - needs_demographics
+  - csv_has_columns:
+      - name: MRID
+        type: string
+      - name: Age
+        type: float
+        min: 0
+        max: 120
+      - name: Sex
+        type: categorical
+        values: [M, F]
+
+steps:
+  - id: run_dlmuse
+    tool: nichart_dlmuse
+    inputs:
+      t1_img: ${STUDY}/t1
+    outputs:
+      dlmuse_seg: ${STUDY}/dlmuse_seg
+      dlmuse_vol: ${STUDY}/dlmuse_vol
+
+  - id: run_nichart_ravens_fireants
+    tool: nichart_ravens_fireants
+    inputs:
+      t1_img: ${STUDY}/t1
+      dlmuse_seg: ${STUDY}/dlmuse_seg
+      demog_csv: ${STUDY}/participants/participants.csv
+    outputs:
+      ravens_out: ${STUDY}/nichart_ravens_out

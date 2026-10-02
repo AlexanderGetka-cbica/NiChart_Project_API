@@ -1,5 +1,8 @@
 services:
   api:
+    # Stable name so desktop LLM apps can reach the MCP server via
+    # `docker exec -i nichart-api nichart-mcp ...` (see docs/mcp-desktop-integration.md).
+    container_name: nichart-api
     build:
       context: .
       target: dev

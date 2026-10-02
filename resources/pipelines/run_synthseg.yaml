@@ -45,6 +45,12 @@ results:
     # SynthSeg labels do not correspond to the MUSE parcellation, and there is no
     # ROI integer-to-region-name mapping for them yet. Add label_map +
     # column_template + feature_groups once that mapping exists.
+    # Feature interpretation for the LLM / UI. Document each output column here —
+    # see resources/pipelines/SCHEMA.md (results → features). Completeness is
+    # checked by scripts/check_feature_docs.py.
+    # TODO: replace {} with entries — definition (required), units, direction,
+    #       interpretation, keywords, references + DOIs.
+    features: {}
 
   per_subject:
     - id: "segmentation"

@@ -142,6 +142,15 @@ def _build_batch_features(
             }
             column_units = {col: u for col, u in units.items() if u} or None
 
+        # Attach authored feature definitions, restricted to columns actually
+        # present in this CSV (a definition for an absent column is ignored).
+        feature_definitions = None
+        if spec.features:
+            present = {
+                col: defn for col, defn in spec.features.items() if col in col_set
+            }
+            feature_definitions = present or None
+
         return BatchFeaturesResult(
             available=True,
             download_path=spec.file,
@@ -149,6 +158,7 @@ def _build_batch_features(
             row_count=len(rows),
             label_map=label_map,
             column_units=column_units,
+            feature_definitions=feature_definitions,
         )
     except Exception:
         return BatchFeaturesResult(available=False)
