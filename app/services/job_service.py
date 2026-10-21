@@ -156,6 +156,33 @@ def _resolve_path(
     return result
 
 
+# ── Atomic file writes ─────────────────────────────────────────────────────────
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via a uniquely-named temp file + rename.
+
+    A bare ``write_text()`` truncates the target before writing, leaving a window
+    in which a concurrent reader sees zero or partial bytes. That matters for
+    every file inside a synced project directory: the S3 uploader streams the
+    file off disk after declaring its Content-Length, so a truncation mid-upload
+    aborts the transfer (the connection closes before a response) and a growth
+    mid-upload silently stores a torn object.
+
+    ``os.replace()`` is atomic on POSIX, so a reader sees either the whole old
+    file or the whole new one, and a reader holding an already-open descriptor
+    keeps reading the intact previous inode. The temp name carries a random
+    suffix so two concurrent writers cannot clobber each other's staging file;
+    ``.tmp`` files are excluded from S3 sync (see ``s3_sync_service``).
+    """
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(text)
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 # ── Step caching ───────────────────────────────────────────────────────────────
 
 _METADATA_FILE = "_working/metadata.json"
@@ -169,7 +196,7 @@ def _load_metadata(study_dir: Path) -> dict:
 def _save_metadata(study_dir: Path, metadata: dict) -> None:
     p = study_dir / _METADATA_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(metadata, indent=2, default=str))
+    _atomic_write_text(p, json.dumps(metadata, indent=2, default=str))
 
 
 def _cache_key(tool_id: str, inputs: dict, params: dict) -> str:
@@ -218,8 +245,13 @@ def _verify_outputs_present(resolved_outputs: dict[str, str]) -> str | None:
         else:  # directory output
             # Ignore _provenance.json: the API writes it into every output dir,
             # and a stale one pulled back from S3 must not mask an empty result.
+            # Ignore *.tmp for the same reason: an atomic-write staging file
+            # orphaned by a hard kill would otherwise count as a real result.
             real = (
-                [e for e in p.iterdir() if e.name != "_provenance.json"]
+                [
+                    e for e in p.iterdir()
+                    if e.name != "_provenance.json" and e.suffix != ".tmp"
+                ]
                 if p.is_dir() else []
             )
             if not real:
@@ -480,7 +512,9 @@ def _write_provenance(
     for d in dirs:
         try:
             d.mkdir(parents=True, exist_ok=True)
-            (d / "_provenance.json").write_text(json.dumps(payload, indent=2, default=str))
+            _atomic_write_text(
+                d / "_provenance.json", json.dumps(payload, indent=2, default=str)
+            )
         except Exception as exc:
             _log.warning("Could not write provenance to %s: %s", d, exc)
 
