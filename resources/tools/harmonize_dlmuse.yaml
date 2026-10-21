@@ -32,5 +32,5 @@ resources:
 time_per_subject_seconds: null
 
 container:
-  image: cbica/combatfam_harmonize_dlmuse:0.0.2
+  image: cbica/combatfam_harmonize_dlmuse:0.0.1
   command: -i {dlmuse_vol_unharmonized} -c {covariate_csv} -o {dlmuse_vol_harmonized}

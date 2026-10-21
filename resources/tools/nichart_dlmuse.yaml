@@ -33,9 +33,9 @@ resources: # Used to allocate jobs on the cloud. Please be diligent.
   memory: 28000 # Amount must be in MiB, see https://docs.aws.amazon.com/batch/latest/APIReference/API_ResourceRequirement.html
   gpus: 1
 
-time_per_subject_seconds: 180
+time_per_subject_seconds: 120
 
 container:
   image: cbica/nichart_dlmuse:1.0.10-wrapped
-  command: -d cuda --in_dir {t1_img} --out_csvs {dlmuse_vol} --out_segs {dlmuse_seg} --cores 1 --refaced-data
+  command: -d cuda --in_dir {t1_img} --out_csvs {dlmuse_vol} --out_segs {dlmuse_seg} --cores 1 --refaced-data --dlmuse_args=-nps=1
 

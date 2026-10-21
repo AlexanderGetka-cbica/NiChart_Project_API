@@ -27,9 +27,12 @@ requires:
       - name: Sex
         type: categorical
         values: [M, F]
+      - name: DX
+        type: string
   - min_subjects:
-      required: 3
+      required: 30
       recommended: 30
+      
 
 steps:
   - id: run_nichart_dlmuse
