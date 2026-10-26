@@ -25,7 +25,7 @@ from app.models.dicom import (
     DicomStagingResult,
 )
 from app.models.errors import ErrorDetail
-from app.services import dicom_service, file_service, job_service
+from app.services import dicom_service, file_service, job_service, usage_service
 
 router = APIRouter(prefix="/projects/{project_id}/files/dicom", tags=["DICOM"])
 
@@ -56,6 +56,7 @@ async def upload_dicom(
 ) -> DicomStagingResult:
     pdir = file_service.resolve_project(settings, user, project_id)
     contents = await file.read()
+    usage_service.record_upload("dicom", settings.execution_mode, files=1, total_bytes=len(contents))
     staging_id = dicom_service.stage_dicom_upload(pdir, contents, file.filename or "")
     return DicomStagingResult(staging_id=staging_id)
 
@@ -81,6 +82,10 @@ async def upload_dicom_files(
 ) -> DicomStagingResult:
     pdir = file_service.resolve_project(settings, user, project_id)
     pairs = [(f.filename or "", await f.read()) for f in files]
+    usage_service.record_upload(
+        "dicom", settings.execution_mode,
+        files=len(pairs), total_bytes=sum(len(d) for _n, d in pairs),
+    )
     staging_id = dicom_service.stage_dicom_files(pdir, pairs)
     return DicomStagingResult(staging_id=staging_id)
 
@@ -166,6 +171,9 @@ async def convert_dicom(
         pipeline_id="dicom_convert",
         direct_steps=direct_steps,
     )
+    usage_service.record_pipeline_run(
+        "dicom_convert", settings.execution_mode, subjects=len(direct_steps)
+    )
     background_tasks.add_task(
         job_service.run_direct_steps_task,
         run=run,
@@ -174,6 +182,7 @@ async def convert_dicom(
         user_token=user.token,
         tools_path=settings.tools_path,
         study_dir=pdir,
+        execution_mode=settings.execution_mode,
     )
     return DicomConvertResult(run_id=run.run_id)
 

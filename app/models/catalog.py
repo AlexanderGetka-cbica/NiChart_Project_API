@@ -4,7 +4,7 @@ Response schemas for the pipeline/tool catalog endpoints.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModalityInfo(BaseModel):
@@ -75,6 +75,15 @@ class ToolDetail(ToolSummary):
             "Used by GET /cloud/status to estimate queue-drain time."
         ),
     )
+    fixed_seconds: float | None = Field(
+        default=None,
+        description=(
+            "One-off wall-clock seconds per invocation regardless of cohort size — "
+            "container start, model loading, interpreter warm-up. A run's estimate is "
+            "fixed_seconds + time_per_subject_seconds x subjects. Tools whose cost is "
+            "almost entirely startup declare only this."
+        ),
+    )
     parallelizable: bool = Field(
         default=False,
         description=(
@@ -100,6 +109,21 @@ class PipelineStep(BaseModel):
     """A single step within a pipeline definition."""
 
     id: str = Field(description="Step identifier, unique within the pipeline.")
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable step name: the step's optional 'name' key in the pipeline "
+            "YAML, falling back to the invoked tool's name. Null when neither exists — "
+            "deliberately NOT the raw id, so a client can choose its own fallback."
+        ),
+    )
+    description: str | None = Field(
+        default=None,
+        description=(
+            "Step description: the step's optional 'description' key in the pipeline "
+            "YAML, falling back to the invoked tool's description. Null when neither exists."
+        ),
+    )
     tool: str = Field(description="Tool ID this step invokes.")
     inputs: dict[str, str] = Field(description="Input slot → path template mapping.")
     outputs: dict[str, str] = Field(description="Output slot → path template mapping.")
@@ -112,6 +136,14 @@ class PipelineSummary(BaseModel):
     id: str = Field(description="Pipeline identifier (YAML basename without extension).")
     name: str = Field(description="Human-readable pipeline name.")
     description: str | None = Field(default=None)
+    input_notes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Short user-facing notes about input requirements that readiness checks "
+            "can't verify (e.g. 'Upload raw, unprocessed T1 images'). Plain text, "
+            "shown verbatim. Empty when the pipeline declares none."
+        ),
+    )
     categories: list[str] = Field(default_factory=list)
     requires: list[str] = Field(
         default_factory=list,
@@ -201,6 +233,74 @@ class ColumnSpec(BaseModel):
     description: str | None = Field(
         default=None,
         description="Human-readable description shown in the UI alongside the column input.",
+    )
+
+
+class SubjectPredicate(BaseModel):
+    """One condition on a participants.csv column, used to define a subject cohort.
+
+    Conditions combine with AND within a single constraint. String comparisons
+    (``equals``, ``in``) are case-insensitive and whitespace-stripped; numeric
+    bounds (``min``, ``max``) are inclusive, matching ColumnSpec.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    column: str = Field(description="participants.csv column this condition applies to.")
+    equals: str | None = Field(
+        default=None,
+        description="Cell must equal this value, compared case-insensitively.",
+    )
+    in_: list[str] | None = Field(
+        default=None,
+        alias="in",
+        description="Cell must be one of these values, compared case-insensitively.",
+    )
+    min: float | None = Field(
+        default=None, description="Inclusive numeric lower bound. Null means unbounded."
+    )
+    max: float | None = Field(
+        default=None, description="Inclusive numeric upper bound. Null means unbounded."
+    )
+
+
+class SubjectConstraintSpec(BaseModel):
+    """A declared minimum number of subjects matching a predicate.
+
+    Only subjects that have imaging *and* a participants.csv row satisfying every
+    condition count towards this minimum.
+    """
+
+    label: str | None = Field(
+        default=None, description="Human-readable cohort name, for display."
+    )
+    where: list[SubjectPredicate] = Field(
+        default_factory=list,
+        description="Conditions defining this cohort, combined with AND.",
+    )
+    required: int = Field(description="Minimum matching subjects needed to run at all.")
+    recommended: int = Field(
+        description="Recommended number of matching subjects for reliable results."
+    )
+
+
+class MinSubjectsSpec(BaseModel):
+    """Declared subject-count requirement, with optional per-cohort minimums.
+
+    Thresholds are returned with pipeline-YAML defaults already resolved, so a
+    client never has to replicate the defaulting rules.
+    """
+
+    required: int = Field(description="Minimum total subjects needed to run at all.")
+    recommended: int = Field(
+        description="Recommended total number of subjects for reliable results."
+    )
+    constraints: list[SubjectConstraintSpec] = Field(
+        default_factory=list,
+        description=(
+            "Per-cohort minimums, e.g. 'at least 30 subjects with DX == CN'. "
+            "Empty when the pipeline declares none."
+        ),
     )
 
 
@@ -351,6 +451,16 @@ class PipelineDetail(PipelineSummary):
             "Pass values via ``params`` in the pipeline submit body. "
             "Step-level params in the YAML are fixed by the pipeline author and "
             "cannot be overridden."
+        ),
+    )
+    min_subjects: MinSubjectsSpec | None = Field(
+        default=None,
+        description=(
+            "Subject-count requirement declared by this pipeline, including any "
+            "per-cohort constraints. Null when the pipeline declares no "
+            "min_subjects requirement. Lets a client show what a pipeline needs "
+            "before any data is uploaded; GET /projects/{id}/readiness/{pipeline_id} "
+            "reports how a specific project measures up."
         ),
     )
     atlas_resource_path: str | None = Field(

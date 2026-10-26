@@ -4,11 +4,17 @@ Readiness service — checks whether a project has the data required by a pipeli
 Pipeline YAML ``requires`` items are either plain strings (e.g. ``needs_T1``,
 ``needs_FLAIR``) or single-key dicts (e.g. ``{csv_has_columns: [MRID, Age]}``).
 This service parses both forms against the actual project directory.
+
+``min_subjects`` additionally supports ``constraints`` — per-cohort minimum
+counts such as "at least 30 subjects with DX == CN". Each constraint counts
+subjects present in both the modality directories and participants.csv, so the
+count reflects the population a pipeline can actually run on.
 """
 
 import csv
 from pathlib import Path
 
+from app.models.catalog import SubjectConstraintSpec, SubjectPredicate
 from app.models.readiness import (
     ColumnCheck,
     CompleteSetsRequirement,
@@ -16,9 +22,11 @@ from app.models.readiness import (
     IdatRequirement,
     ImagingRequirement,
     ReadinessReport,
+    SubjectConstraintCheck,
     SubjectCountRequirement,
 )
 from app import modalities
+from app.services.catalog_service import parse_min_subjects
 from app.services.file_service import collect_project_mrids
 
 _PARTICIPANTS_CSV = Path("participants") / "participants.csv"
@@ -189,6 +197,128 @@ def _check_csv_values(
     return col_invalid
 
 
+def _read_csv_rows(project_path: Path) -> tuple[dict[str, dict[str, str]], set[str]]:
+    """Return ``({mrid: {lowercased_column: stripped_value}}, lowercased_column_names)``.
+
+    Column names are lowercased so predicates can be written in any case. The
+    column set is returned separately because it is still known when the CSV has
+    a header but no data rows — which is what lets a constraint distinguish
+    "no such column" from "no matching subjects".
+    """
+    csv_path = project_path / _PARTICIPANTS_CSV
+    if not csv_path.exists():
+        return {}, set()
+    with csv_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        if not fieldnames:
+            return {}, set()
+        col_map = {c.lower(): c for c in fieldnames}
+        if "mrid" not in col_map:
+            return {}, set(col_map)
+        rows: dict[str, dict[str, str]] = {}
+        for row in reader:
+            mrid = (row.get(col_map["mrid"]) or "").strip()
+            if not mrid:
+                continue
+            rows[mrid] = {
+                lower: (row.get(actual) or "").strip()
+                for lower, actual in col_map.items()
+            }
+    return rows, set(col_map)
+
+
+def _matches_predicate(value: str, pred: SubjectPredicate) -> bool:
+    """True when one already-stripped cell value satisfies one predicate.
+
+    String comparisons are case-insensitive: clinical CSVs routinely mix 'CN',
+    'cn' and 'Cn' for the same category. Numeric bounds are inclusive, matching
+    ColumnSpec's min/max. An empty cell never matches — a blank diagnosis is not
+    evidence of a diagnosis.
+    """
+    if not value:
+        return False
+
+    if pred.equals is not None and value.casefold() != pred.equals.strip().casefold():
+        return False
+
+    if pred.in_:
+        permitted = {str(a).strip().casefold() for a in pred.in_}
+        if value.casefold() not in permitted:
+            return False
+
+    if pred.min is not None or pred.max is not None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return False
+        if pred.min is not None and number < pred.min:
+            return False
+        if pred.max is not None and number > pred.max:
+            return False
+
+    return True
+
+
+def _check_subject_constraints(
+    constraints: list[SubjectConstraintSpec],
+    project_mrids: list[str],
+    rows: dict[str, dict[str, str]],
+    columns: set[str],
+) -> list[SubjectConstraintCheck]:
+    """Evaluate each ``min_subjects.constraints`` entry against the project.
+
+    A constraint counts subjects that have imaging *and* a participants.csv row
+    satisfying every condition — the population the pipeline can actually run
+    on. For harmonization that is the right denominator: ComBat fits on
+    subjects with both a scan and valid covariates.
+
+    Thresholds arrive already defaulted by ``catalog_service.parse_min_subjects``.
+    """
+    checks: list[SubjectConstraintCheck] = []
+
+    for spec in constraints:
+        absent = sorted(
+            p.column for p in spec.where if p.column.lower() not in columns
+        )
+
+        unevaluable: str | None = None
+        matching: list[str] = []
+        if not spec.where:
+            unevaluable = "constraint declares no usable 'where' conditions"
+        elif absent:
+            unevaluable = "participants.csv has no column named " + ", ".join(
+                f"'{c}'" for c in absent
+            )
+        elif not rows:
+            unevaluable = "participants.csv is missing, empty, or has no MRID column"
+        else:
+            for mrid in project_mrids:
+                row = rows.get(mrid)
+                if row is None:
+                    continue  # imaging but no covariates — cannot be evaluated
+                if all(
+                    _matches_predicate(row.get(p.column.lower(), ""), p)
+                    for p in spec.where
+                ):
+                    matching.append(mrid)
+
+        actual = len(matching)
+        checks.append(SubjectConstraintCheck(
+            label=spec.label,
+            where=spec.where,
+            actual=actual,
+            required=spec.required,
+            recommended=spec.recommended,
+            satisfied=unevaluable is None and actual >= spec.required,
+            recommended_met=unevaluable is None and actual >= spec.recommended,
+            matching_mrids=matching,
+            unevaluable_reason=unevaluable,
+        ))
+
+    return checks
+
+
 def check_readiness(
     project_path: Path,
     pipeline_id: str,
@@ -199,7 +329,8 @@ def check_readiness(
     needs_idat = False
     csv_columns_required: list[str] = []
     col_schemas: dict[str, dict] = {}
-    min_subjects_spec: dict | None = None
+    # Thresholds and constraints, with pipeline-YAML defaults already resolved.
+    min_subjects_spec = parse_min_subjects(raw_requires)
 
     for item in raw_requires:
         if isinstance(item, str):
@@ -225,8 +356,6 @@ def check_readiness(
                         name = str(c["name"])
                         csv_columns_required.append(name)
                         col_schemas[name] = c
-            if "min_subjects" in item:
-                min_subjects_spec = item["min_subjects"]
 
     # Cross-modality completeness check (only meaningful when ≥2 modalities required)
     complete_sets_check: CompleteSetsRequirement | None = None
@@ -272,15 +401,32 @@ def check_readiness(
 
     subject_count_check: SubjectCountRequirement | None = None
     if min_subjects_spec is not None:
-        required = int(min_subjects_spec.get("required", 1))
-        recommended = int(min_subjects_spec.get("recommended", required))
-        actual = len(collect_project_mrids(project_path))
+        project_mrids = collect_project_mrids(project_path)
+        actual = len(project_mrids)
+
+        # Per-cohort minimums, e.g. "at least 30 subjects with DX == CN".
+        constraint_checks: list[SubjectConstraintCheck] = []
+        if min_subjects_spec.constraints:
+            rows, columns = _read_csv_rows(project_path)
+            constraint_checks = _check_subject_constraints(
+                min_subjects_spec.constraints, project_mrids, rows, columns
+            )
+
+        # satisfied/recommended_met fold in the constraints so a consumer can
+        # gate on this one flag; `constraints` carries the per-cohort detail.
         subject_count_check = SubjectCountRequirement(
             actual=actual,
-            required=required,
-            recommended=recommended,
-            satisfied=actual >= required,
-            recommended_met=actual >= recommended,
+            required=min_subjects_spec.required,
+            recommended=min_subjects_spec.recommended,
+            satisfied=(
+                actual >= min_subjects_spec.required
+                and all(c.satisfied for c in constraint_checks)
+            ),
+            recommended_met=(
+                actual >= min_subjects_spec.recommended
+                and all(c.recommended_met for c in constraint_checks)
+            ),
+            constraints=constraint_checks,
         )
 
     all_ok = all(c.satisfied for c in imaging_checks)

@@ -21,7 +21,13 @@ from app.models.files import (
 )
 from app.models.provenance import ProvenanceReport
 from app.models.readiness import ReadinessReport
-from app.services import catalog_service, file_service, provenance_service, readiness_service
+from app.services import (
+    catalog_service,
+    file_service,
+    provenance_service,
+    readiness_service,
+    usage_service,
+)
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["Files"])
 
@@ -171,6 +177,10 @@ async def upload_nifti(
     pdir = file_service.resolve_project(settings, user, project_id)
     filenames = [f.filename or "" for f in files]
     file_data = [await f.read() for f in files]
+    usage_service.record_upload(
+        "nifti", settings.execution_mode,
+        files=len(file_data), total_bytes=sum(len(d) for d in file_data),
+    )
     return file_service.stage_nifti_files(pdir, filenames, file_data)
 
 
@@ -202,6 +212,7 @@ async def upload_nifti_zip(
 ) -> NiftiStagingResult:
     pdir = file_service.resolve_project(settings, user, project_id)
     contents = await file.read()
+    usage_service.record_upload("nifti", settings.execution_mode, files=1, total_bytes=len(contents))
     return file_service.stage_nifti_zip(pdir, contents, file.filename or "")
 
 
@@ -270,6 +281,7 @@ async def upload_csv(
 ) -> None:
     pdir = file_service.resolve_project(settings, user, project_id)
     contents = await file.read()
+    usage_service.record_upload("csv", settings.execution_mode, files=1, total_bytes=len(contents))
     file_service.store_csv_upload(pdir, contents, file.filename or "")
 
 
@@ -295,6 +307,7 @@ async def upload_bids(
 ) -> None:
     pdir = file_service.resolve_project(settings, user, project_id)
     contents = await file.read()
+    usage_service.record_upload("bids", settings.execution_mode, files=1, total_bytes=len(contents))
     file_service.store_bids_upload(pdir, contents, file.filename or "")
 
 
@@ -318,6 +331,10 @@ async def upload_bids_files(
 ) -> None:
     pdir = file_service.resolve_project(settings, user, project_id)
     pairs = [(f.filename or "", await f.read()) for f in files]
+    usage_service.record_upload(
+        "bids", settings.execution_mode,
+        files=len(pairs), total_bytes=sum(len(d) for _n, d in pairs),
+    )
     file_service.store_bids_files(pdir, pairs)
 
 
@@ -338,6 +355,7 @@ async def upload_idat(
 ) -> None:
     pdir = file_service.resolve_project(settings, user, project_id)
     contents = await file.read()
+    usage_service.record_upload("idat", settings.execution_mode, files=1, total_bytes=len(contents))
     file_service.store_idat_upload(pdir, contents, file.filename or "")
 
 
@@ -360,6 +378,10 @@ async def upload_idat_files(
 ) -> None:
     pdir = file_service.resolve_project(settings, user, project_id)
     pairs = [(f.filename or "", await f.read()) for f in files]
+    usage_service.record_upload(
+        "idat", settings.execution_mode,
+        files=len(pairs), total_bytes=sum(len(d) for _n, d in pairs),
+    )
     file_service.store_idat_files(pdir, pairs)
 
 

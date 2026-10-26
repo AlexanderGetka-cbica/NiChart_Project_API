@@ -91,3 +91,93 @@ def test_get_var_group_catalog(local_client):
 def test_var_group_catalog_requires_no_auth(local_client):
     resp = local_client.get("/catalog/var-groups", headers={})
     assert resp.status_code == 200
+
+
+# ── requires names + min_subjects surfacing ───────────────────────────────────
+
+def test_requires_lists_names_not_stringified_dicts(local_client):
+    """Structured requirements contribute their key, not a repr of the dict."""
+    resp = local_client.get("/catalog/pipelines/run_dlmuse_harmonized")
+    assert resp.status_code == 200
+    requires = resp.json()["requires"]
+
+    assert "needs_T1" in requires
+    assert "csv_has_columns" in requires
+    assert "min_subjects" in requires
+    # No entry should be a stringified Python dict.
+    assert all(not r.startswith("{") for r in requires), requires
+
+
+def test_min_subjects_surfaced_with_constraints(local_client):
+    """The UI can show what a pipeline needs before any data is uploaded."""
+    resp = local_client.get("/catalog/pipelines/run_dlmuse_harmonized")
+    assert resp.status_code == 200
+    spec = resp.json()["min_subjects"]
+
+    assert spec["required"] == 30
+    assert spec["recommended"] == 30
+
+    constraint = spec["constraints"][0]
+    assert constraint["label"] == "Cognitively normal controls"
+    # Defaults resolved server-side: inherits the parent 30/30.
+    assert constraint["required"] == 30
+    assert constraint["recommended"] == 30
+    assert constraint["where"] == [
+        {"column": "DX", "equals": "CN", "in": None, "min": None, "max": None}
+    ]
+
+
+def test_min_subjects_null_when_not_declared(local_client):
+    resp = local_client.get("/catalog/pipelines/test_pipeline")
+    assert resp.status_code == 200
+    assert resp.json()["min_subjects"] is None
+
+
+# ── input_notes ───────────────────────────────────────────────────────────────
+
+_RAW_T1_NOTE = (
+    "Upload raw (unprocessed) T1 images — not skull-stripped, "
+    "bias-corrected or registered T1s."
+)
+
+
+def test_input_notes_in_pipeline_list(local_client):
+    """The list endpoint carries notes, so a pipeline card can show them."""
+    resp = local_client.get("/catalog/pipelines")
+    assert resp.status_code == 200
+    by_id = {p["id"]: p for p in resp.json()}
+
+    assert by_id["run_brain2vec"]["input_notes"] == [_RAW_T1_NOTE]
+
+
+def test_input_notes_in_pipeline_detail(local_client):
+    resp = local_client.get("/catalog/pipelines/run_brain2vec")
+    assert resp.status_code == 200
+    assert resp.json()["input_notes"] == [_RAW_T1_NOTE]
+
+
+def test_input_notes_default_empty(local_client):
+    """A pipeline declaring none reports [], not null."""
+    for url in ("/catalog/pipelines/test_pipeline", "/catalog/pipelines"):
+        resp = local_client.get(url)
+        assert resp.status_code == 200
+    detail = local_client.get("/catalog/pipelines/test_pipeline").json()
+    assert detail["input_notes"] == []
+
+    summary = next(
+        p for p in local_client.get("/catalog/pipelines").json()
+        if p["id"] == "test_pipeline"
+    )
+    assert summary["input_notes"] == []
+
+
+def test_malformed_input_notes_are_ignored():
+    """A bad value must not make a pipeline unlistable."""
+    from app.services.catalog_service import _parse_input_notes
+
+    assert _parse_input_notes(None) == []
+    assert _parse_input_notes("a bare string") == []        # not a list
+    assert _parse_input_notes({"note": "x"}) == []          # not a list
+    assert _parse_input_notes([]) == []
+    assert _parse_input_notes(["  ", ""]) == []             # blanks dropped
+    assert _parse_input_notes([" keep me ", 42]) == ["keep me", "42"]

@@ -11,6 +11,9 @@ description: |
 
 docs_id: brain2vec
 
+input_notes:
+  - "Upload raw (unprocessed) T1 images — not skull-stripped, bias-corrected or registered T1s."
+
 categories:
   - image-processing
   - feature-extraction

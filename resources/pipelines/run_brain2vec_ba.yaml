@@ -5,6 +5,9 @@ description: |
   Uses the ViT brain-age model weights baked into the Brain2Vec image — no
   user-supplied weights are required.
 
+input_notes:
+  - "Upload raw (unprocessed) T1 images — not skull-stripped, bias-corrected or registered T1s."
+
 categories:
   - image-processing
   - feature-extraction

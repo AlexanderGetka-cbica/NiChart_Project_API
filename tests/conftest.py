@@ -25,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
+from app.services import usage_service
 from app.auth.dependencies import CurrentUser, require_auth
 from app.backends.base import JobBackend, JobHandle, ToolSpec
 
@@ -245,3 +246,18 @@ def cloud_client(rsa_key, jwks):
         yield client
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _disable_usage_counting(monkeypatch):
+    """Never let the test suite reach the real usage endpoint.
+
+    The endpoint URL is a hardcoded source constant (so desktop and on-prem
+    installs report without any configuration), which means every test that
+    submits a pipeline or uploads a file would otherwise fire real HTTP at
+    production. Blanking the URL makes usage_service a no-op; tests that
+    exercise counting override it themselves.
+    """
+    monkeypatch.setattr(usage_service, "USAGE_ENDPOINT_URL", "")
+    monkeypatch.setattr(usage_service, "_failures", 0)
+    monkeypatch.setattr(usage_service, "_disabled", False)

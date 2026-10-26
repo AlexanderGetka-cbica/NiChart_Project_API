@@ -29,8 +29,15 @@ from app.models.jobs import (
     PipelineRunLogs,
     PipelineRunSubmit,
     PipelineRunSummary,
+    RunPlan,
 )
-from app.services import catalog_service, file_service, job_service
+from app.services import (
+    catalog_service,
+    file_service,
+    job_service,
+    readiness_service,
+    usage_service,
+)
 from app.services.job_service import S3SyncConfig
 
 
@@ -122,6 +129,21 @@ def _resolve_params(
                 effective[name] = spec.default
     return effective
 
+def _plan_subject_count(report) -> int:
+    """Project-level subject count, matching the readiness check's rule.
+
+    Subjects complete across every required modality when the pipeline needs two
+    or more; otherwise the smallest per-modality imaging count. Per-step estimates
+    use each step's own count instead (see RunPlanStep.subjects), which differs for
+    steps whose input is a single CSV rather than an image directory.
+    """
+    if report.complete_sets is not None:
+        return report.complete_sets.complete_count
+    if report.imaging:
+        return min(c.subject_count for c in report.imaging)
+    return 0
+
+
 # Two routers: one project-scoped (for submission), one top-level (for queries)
 project_router = APIRouter(prefix="/projects/{project_id}/jobs", tags=["Jobs"])
 jobs_router = APIRouter(prefix="/jobs", tags=["Jobs"])
@@ -162,11 +184,18 @@ async def submit_pipeline(
     pdir = file_service.resolve_project(settings, user, project_id)
     pipeline = catalog_service.get_pipeline(settings.pipelines_path, body.pipeline_id)
     effective_params = _resolve_params(body.params, pipeline.parameters)
+    job_service.validate_start_from_step(pipeline.steps, body.start_from_step)
     run = job_service.create_pipeline_run(
         user_id=user.sub,
         project_id=project_id,
         pipeline_id=body.pipeline_id,
         pipeline_steps=pipeline.steps,
+        start_from_step=body.start_from_step,
+    )
+    usage_service.record_pipeline_run(
+        body.pipeline_id,
+        settings.execution_mode,
+        subjects=len(file_service.collect_project_mrids(pdir)),
     )
     s3_sync: S3SyncConfig | None = None
     if settings.s3_data_bucket and settings.execution_mode == "cloud":
@@ -186,8 +215,81 @@ async def submit_pipeline(
         tools_path=settings.tools_path,
         s3_sync=s3_sync,
         execution_mode=settings.execution_mode,
+        start_from_step=body.start_from_step,
     )
     return job_service.get_run_detail(run.run_id, user.sub)
+
+
+# ── Dry-run plan (project-scoped) ─────────────────────────────────────────────
+
+@project_router.post(
+    "/pipelines/plan",
+    summary="Plan a pipeline run without submitting it",
+    description=(
+        "Predicts how a submission would execute right now: which steps would be "
+        "reused from the step cache, which would run, and roughly how long the run "
+        "would take.\n\n"
+        "Read-only — creates no run record, submits no jobs and does not touch the "
+        "step cache. It stats input/output paths and reads the cache metadata, so it "
+        "is cheap enough to call whenever the pipeline, params or reuse toggle "
+        "change.\n\n"
+        "Takes the same body as the submit route, including ``start_from_step``. "
+        "Estimates assume **serial** execution: they are not divided by chunks or "
+        "workers, because chunking is not guaranteed and chunks need not run "
+        "concurrently."
+    ),
+    response_model=RunPlan,
+    responses={
+        **_AUTH_ERRORS,
+        400: {"model": ErrorDetail, "description": "Unknown start_from_step."},
+        404: {"model": ErrorDetail, "description": "Project or pipeline not found."},
+    },
+)
+async def plan_pipeline(
+    project_id: str,
+    body: PipelineRunSubmit,
+    user: CurrentUser = Depends(require_auth),
+    settings: Settings = Depends(get_settings),
+) -> RunPlan:
+    pdir = file_service.resolve_project(settings, user, project_id)
+    pipeline = catalog_service.get_pipeline(
+        settings.pipelines_path, body.pipeline_id, None, settings.tools_path
+    )
+    job_service.validate_start_from_step(pipeline.steps, body.start_from_step)
+    effective_params = _resolve_params(body.params, pipeline.parameters)
+
+    steps, total_seconds, full_seconds = job_service.plan_pipeline_run(
+        study_dir=pdir,
+        pipeline_steps=pipeline.steps,
+        user_params=effective_params,
+        reuse_cached_steps=body.reuse_cached_steps,
+        tools_path=settings.tools_path,
+        start_from_step=body.start_from_step,
+    )
+
+    # Readiness is informational here: an unready project still gets a plan,
+    # because each step's prediction remains meaningful.
+    raw_requires = catalog_service.get_pipeline_raw_requires(
+        settings.pipelines_path, body.pipeline_id
+    )
+    report = readiness_service.check_readiness(pdir, body.pipeline_id, raw_requires)
+
+    return RunPlan(
+        pipeline_id=body.pipeline_id,
+        reuse_cached_steps=body.reuse_cached_steps,
+        start_from_step=body.start_from_step,
+        ready=report.satisfied,
+        subject_count=_plan_subject_count(report),
+        steps=steps,
+        estimated_total_seconds=total_seconds,
+        estimated_full_seconds=full_seconds,
+        steps_missing_timing=sum(
+            1 for s in steps if s.action == "run" and s.estimated_seconds is None
+        ),
+        steps_reused=sum(1 for s in steps if s.action == "reuse"),
+        steps_forced_skip=sum(1 for s in steps if s.action == "skip_forced"),
+        steps_total=len(steps),
+    )
 
 
 # ── Queries (top-level, optional project filter) ──────────────────────────────

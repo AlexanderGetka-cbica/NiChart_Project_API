@@ -41,6 +41,10 @@ class ToolSpec:
     parameters: dict[str, Any] = field(default_factory=dict)  # raw spec dicts from YAML
     resources: dict[str, Any] = field(default_factory=dict)   # vcpus, memory, gpus
     time_per_subject_seconds: float | None = None
+    # One-off cost per invocation regardless of cohort size: container pull/start,
+    # model loading, R/Python interpreter warm-up. For tools dominated by startup
+    # rather than per-subject work, this is the only honest way to describe them.
+    fixed_seconds: float | None = None
     # Singularity invocation mode for this tool.
     # "run"  → apptainer run  sif <args>    (command template is args to the container entrypoint)
     # "exec" → apptainer exec sif <cmd>     (command template begins with the executable)

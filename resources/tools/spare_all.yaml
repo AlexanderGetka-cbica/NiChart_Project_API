@@ -29,6 +29,11 @@ resources:
   memory: 8000
   gpus: 0
 
+# Measured 2026-10-23 on cbica/nichart_spare_score_runall:0.0.4, POINTER cohort:
+# 9.8 s at N=50 and 10.4 s at N=2485. Per-subject cost (~0.0002 s) is below
+# measurement noise, so only the fixed cost is declared — it is container start
+# plus loading two joblib models.
+fixed_seconds: 10
 time_per_subject_seconds: null
 
 container:

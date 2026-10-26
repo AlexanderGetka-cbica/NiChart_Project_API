@@ -4,6 +4,11 @@ Response schemas for the pipeline readiness check endpoint.
 
 from pydantic import BaseModel, Field
 
+# SubjectPredicate is a declaration from the pipeline YAML, so it lives with the
+# other catalog specs (alongside ColumnSpec) and is echoed back here as part of
+# each evaluated constraint.
+from app.models.catalog import SubjectPredicate
+
 
 class ImagingRequirement(BaseModel):
     """Readiness check for a single required imaging modality."""
@@ -45,14 +50,72 @@ class CsvRequirement(BaseModel):
     )
 
 
+class SubjectConstraintCheck(BaseModel):
+    """Readiness check for a minimum count of subjects matching a predicate.
+
+    Counts subjects present in BOTH the modality directories and participants.csv:
+    a subject with imaging but no covariate row cannot be evaluated and is not
+    counted, and neither is a CSV row with no imaging.
+    """
+
+    label: str | None = Field(
+        default=None,
+        description="Human-readable cohort name from the pipeline YAML, for display.",
+    )
+    where: list[SubjectPredicate] = Field(
+        default_factory=list,
+        description="Conditions defining this cohort, combined with AND.",
+    )
+    actual: int = Field(description="Subjects with imaging whose CSV row matches every condition.")
+    required: int = Field(
+        description="Minimum matching subjects. Defaults to the parent min_subjects.required."
+    )
+    recommended: int = Field(
+        description="Recommended matching subjects. Defaults to this constraint's required."
+    )
+    satisfied: bool = Field(description="True if actual >= required and the cohort was evaluable.")
+    recommended_met: bool = Field(
+        description="True if actual >= recommended and the cohort was evaluable."
+    )
+    matching_mrids: list[str] = Field(
+        default_factory=list, description="MRIDs counted towards this constraint."
+    )
+    unevaluable_reason: str | None = Field(
+        default=None,
+        description=(
+            "Set when the cohort could not be evaluated at all — for example "
+            "participants.csv is absent or lacks a column named by a condition. "
+            "Distinguishes 'cannot tell' from a genuine count of zero."
+        ),
+    )
+
+
 class SubjectCountRequirement(BaseModel):
     """Readiness check for a minimum subject count, used by harmonized pipelines."""
 
     actual: int = Field(description="Unique MRIDs detected across all modality directories.")
-    required: int = Field(description="Minimum subjects needed to run the pipeline at all.")
-    recommended: int = Field(description="Recommended number of subjects for reliable results.")
-    satisfied: bool = Field(description="True if actual >= required.")
-    recommended_met: bool = Field(description="True if actual >= recommended.")
+    required: int = Field(description="Minimum total subjects needed to run the pipeline at all.")
+    recommended: int = Field(
+        description="Recommended total number of subjects for reliable results."
+    )
+    satisfied: bool = Field(
+        description=(
+            "True if the total meets required AND every entry in constraints is satisfied. "
+            "Use this as the single gate for the whole subject-count requirement."
+        )
+    )
+    recommended_met: bool = Field(
+        description=(
+            "True if the total meets recommended AND every constraint's recommended is met."
+        )
+    )
+    constraints: list[SubjectConstraintCheck] = Field(
+        default_factory=list,
+        description=(
+            "Per-cohort minimum counts, e.g. 'at least 30 subjects with DX == CN'. "
+            "Empty when the pipeline declares no constraints."
+        ),
+    )
 
 
 class CompleteSetsRequirement(BaseModel):

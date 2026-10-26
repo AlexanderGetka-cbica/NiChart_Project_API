@@ -55,7 +55,9 @@ async def get_pipeline(
     pipeline_id: str,
     settings: Settings = Depends(get_settings),
 ) -> PipelineDetail:
-    return catalog_service.get_pipeline(settings.pipelines_path, pipeline_id, settings.resources_path)
+    return catalog_service.get_pipeline(
+        settings.pipelines_path, pipeline_id, settings.resources_path, settings.tools_path
+    )
 
 
 @router.get(

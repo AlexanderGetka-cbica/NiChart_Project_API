@@ -68,11 +68,27 @@ resources:
   memory: <int>      # Memory in MiB. See https://docs.aws.amazon.com/batch/latest/APIReference/API_ResourceRequirement.html
   gpus: <int>        # 0 for CPU-only tools; 1 for tools that need a GPU.
 
-# ── Throughput hint ───────────────────────────────────────────────────────────
+# ── Timing hints ──────────────────────────────────────────────────────────────
 # Expected wall-clock seconds to process one subject.
 # Used by GET /cloud/status to estimate queue-drain time.
 # Use null for batch tools that don't scale linearly with subject count.
 time_per_subject_seconds: <float> | null
+
+# One-off seconds per invocation, independent of cohort size: container start,
+# model loading, interpreter warm-up. Optional.
+#
+# A run estimate is fixed_seconds + time_per_subject_seconds x subjects, with
+# either treated as 0 when absent. Declare at least one of the two, or
+# POST /projects/{id}/jobs/pipelines/plan reports the step as having no timing
+# at all and leaves it out of the total.
+#
+# Measure it at two cohort sizes and solve for the slope and intercept rather
+# than guessing: a startup-dominated tool given a per-subject-only figure will
+# have its long-cohort estimate wildly overstated. For example harmonize_dlmuse
+# measured 60.1 s at N=50 and 80.3 s at N=2485, i.e. ~60 s fixed plus
+# ~0.008 s/subject — expressing that as a per-subject number alone would have
+# predicted roughly 50 hours for 2485 subjects instead of 80 seconds.
+fixed_seconds: <float> | null
 
 # ── Parallelization ───────────────────────────────────────────────────────────
 # When true, the orchestrator splits directory inputs by MRID across multiple
@@ -183,6 +199,7 @@ resources:
   gpus: 0
 
 time_per_subject_seconds: null
+# fixed_seconds: 10            # Uncomment for a tool whose cost is mostly startup.
 
 parallelizable: false          # Set to true if each subject is processed independently.
 # subjects_per_chunk: 10       # Uncomment and tune if parallelizable: true.
