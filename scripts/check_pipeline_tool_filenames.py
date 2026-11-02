@@ -13,6 +13,18 @@ have no such constraint. A mismatch produces a silently-empty output at runtime
 (the tool writes one name, the pipeline looks for another), so this guards against
 that whole class of bug.
 
+Also cross-checks the two places a per-subject filename is declared, so they
+cannot drift apart:
+
+    tool   outputs.{label}.contents[].pattern      (e.g. "{MRID}_DLMUSE.nii.gz")
+    pipe   results.per_subject[].pattern           (e.g. "dlmuse_seg/{MRID}_DLMUSE.nii.gz")
+
+A pipeline's per-subject pattern whose directory is a step output must agree
+with what the producing tool declares it writes there. The tool declaration is
+what an intermediate upload is validated against, and the pipeline declaration
+is what the viewer fetches, so a disagreement means one of the two is lying
+about the data on disk.
+
 Usage:
     python scripts/check_pipeline_tool_filenames.py
 
@@ -57,7 +69,9 @@ def main() -> int:
 
     mismatches: list[str] = []
     missing: list[str] = []
+    content_mismatches: list[str] = []
     checked = 0
+    contents_checked = 0
 
     for pp in sorted(PIPELINES_DIR.glob("*.yaml")):
         try:
@@ -106,6 +120,46 @@ def main() -> int:
                         f"      pipeline output        : {pipe_base!r}   ({pipe_path})"
                     )
 
+        # ── per_subject patterns vs the producing tool's declared contents ──
+        step_output_dirs: dict[str, tuple[str, str, str]] = {}
+        for step in pdef.get("steps") or []:
+            tdef = tools.get(step.get("tool")) or {}
+            t_outputs = tdef.get("outputs") or {}
+            for label, pipe_path in (step.get("outputs") or {}).items():
+                path = str(pipe_path)
+                if os.path.splitext(path)[1]:
+                    continue  # file output, not a directory of per-subject files
+                rel = path.replace("${STUDY}/", "").rstrip("/")
+                step_output_dirs[rel] = (
+                    step.get("id"), step.get("tool"), label,
+                )
+
+        for item in ((pdef.get("results") or {}).get("per_subject") or []):
+            pattern = item.get("pattern")
+            if not pattern:
+                continue
+            directory, _, filename = str(pattern).rpartition("/")
+            producer = step_output_dirs.get(directory)
+            if producer is None:
+                continue  # not a step output (e.g. a raw modality directory)
+            step_id, tool_id, label = producer
+            declared = [
+                c.get("pattern")
+                for c in ((tools.get(tool_id) or {}).get("outputs") or {})
+                               .get(label, {}).get("contents") or []
+                if isinstance(c, dict)
+            ]
+            if not declared:
+                continue  # tool declares nothing; nothing to disagree with
+            contents_checked += 1
+            if filename not in declared:
+                content_mismatches.append(
+                    f"{pp.name}  results.per_subject '{item.get('id')}' vs tool "
+                    f"{tool_id} output '{label}' (step '{step_id}'):\n"
+                    f"      pipeline per_subject pattern : {filename!r}\n"
+                    f"      tool declares                : {declared!r}"
+                )
+
     if mismatches:
         print("File-output basename MISMATCHES:")
         for m in mismatches:
@@ -114,12 +168,22 @@ def main() -> int:
         print("Missing tool/label/mount wiring:")
         for m in missing:
             print("  " + m)
+    if content_mismatches:
+        print("Per-subject pattern vs tool-declared contents MISMATCHES:")
+        for m in content_mismatches:
+            print("  " + m)
 
-    if mismatches or missing:
-        print(f"\nFAIL: {len(mismatches)} mismatch(es), {len(missing)} missing-wiring issue(s).")
+    if mismatches or missing or content_mismatches:
+        print(
+            f"\nFAIL: {len(mismatches)} mismatch(es), {len(missing)} missing-wiring "
+            f"issue(s), {len(content_mismatches)} content mismatch(es)."
+        )
         return 1
 
-    print(f"OK: {checked} file output(s) checked across all pipelines; all filenames consistent.")
+    print(
+        f"OK: {checked} file output(s) and {contents_checked} per-subject pattern(s) "
+        "checked across all pipelines; all filenames consistent."
+    )
     return 0
 
 

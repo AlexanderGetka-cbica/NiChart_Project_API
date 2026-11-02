@@ -137,6 +137,25 @@ class PipelineRunSummary(BaseModel):
     total_steps: int = Field(default=0)
 
 
+class ManualUploadRecord(BaseModel):
+    """One slot that was supplied by hand rather than produced by a run."""
+
+    slot_id: str | None = Field(default=None, description="Slot the data was uploaded into.")
+    path: str | None = Field(default=None, description="Project-relative path of the slot.")
+    pipeline_id: str | None = Field(
+        default=None, description="Pipeline the slot was uploaded for."
+    )
+    produced_by_step: str | None = Field(
+        default=None, description="Step that normally produces this slot."
+    )
+    files: int | None = Field(default=None, description="Number of files written.")
+    total_bytes: int | None = Field(default=None, description="Total bytes written.")
+    replace: bool | None = Field(
+        default=None, description="Whether the slot was cleared before writing."
+    )
+    uploaded_at: str | None = Field(default=None, description="ISO-8601 upload time.")
+
+
 class PipelineRunDetail(PipelineRunSummary):
     """Full pipeline run record including per-step breakdown."""
 
@@ -147,6 +166,15 @@ class PipelineRunDetail(PipelineRunSummary):
         description=(
             "Step id the run was started at, if the caller requested one. Steps before it "
             "carry skip_reason 'forced'. Null for a normal full-pipeline run."
+        ),
+    )
+    manual_uploads: list[ManualUploadRecord] = Field(
+        default_factory=list,
+        description=(
+            "Intermediate data that had been supplied by hand in this project when "
+            "the run was submitted. Non-empty means some of the run's inputs were "
+            "not produced by a pipeline on this project, so its results are not "
+            "reproducible from the project's raw data. Empty for a normal run."
         ),
     )
     jobs_ahead: int | None = Field(
@@ -290,6 +318,15 @@ class RunPlanStep(BaseModel):
             "Project-relative resolved input paths that do not exist on disk right now. "
             "Only populated for the start_from_step step, as a warning for the UI — it "
             "never blocks the plan or a submit."
+        ),
+    )
+    uses_manual_uploads: bool = Field(
+        default=False,
+        description=(
+            "True when at least one of this step's inputs was supplied by a manual "
+            "intermediate upload rather than produced by a pipeline run. Results "
+            "downstream of such a step are not reproducible from the project's raw "
+            "data; a client should mark them accordingly."
         ),
     )
 

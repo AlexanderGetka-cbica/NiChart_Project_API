@@ -11,8 +11,17 @@ inputs:
 outputs:
   dlmuse_vol:
     type: directory
+    # Observed output of cbica/nichart_dlmuse: one summary CSV for the cohort.
+    contents:
+      - pattern: "DLMUSE_Volumes.csv"
+        csv_columns: [MRID, DL_MUSE_Volume_702]
   dlmuse_seg:
     type: directory
+    # Observed: one segmentation per subject, named after the input T1 stem.
+    # Matches results.per_subject in run_dlmuse.yaml.
+    contents:
+      - pattern: "{MRID}_DLMUSE.nii.gz"
+        per_subject: true
 
 mounts:
   t1_img:
@@ -33,7 +42,17 @@ resources: # Used to allocate jobs on the cloud. Please be diligent.
   memory: 28000 # Amount must be in MiB, see https://docs.aws.amazon.com/batch/latest/APIReference/API_ResourceRequirement.html
   gpus: 1
 
-time_per_subject_seconds: 120
+# Measured 2026-10-27 on a GTX 1080 Ti: 140 s at N=1 and 281 s at N=3
+# => ~70 s fixed (CUDA init + loading the DLICV and DLMUSE nnU-Net models)
+# plus ~70 s/subject. The previous flat 120 s/subject overstated a 30-subject
+# run by ~1.7x (60 min vs a measured 36 min).
+#
+# HARDWARE DEPENDENT: the cloud Batch run of 581 IXI subjects on 2026-10-22
+# finished in ~6.2 h, i.e. <=38 s/subject including queue time — roughly twice
+# as fast as this local card. These figures are therefore conservative for
+# cloud estimates; re-measure on Batch if cloud accuracy matters.
+fixed_seconds: 70
+time_per_subject_seconds: 70
 
 container:
   image: cbica/nichart_dlmuse:1.0.10-wrapped

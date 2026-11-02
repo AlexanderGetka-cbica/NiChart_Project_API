@@ -10,8 +10,17 @@ inputs:
     type: directory
   dlmuse_seg:
     type: directory
+    # DELIBERATELY UNDECLARED. This tool is invoked with
+    # --dlmuse_suff _T1_DLMUSE.nii.gz, i.e. it expects {MRID}_T1_DLMUSE.nii.gz,
+    # but nichart_dlmuse is observed to write {MRID}_DLMUSE.nii.gz, which is
+    # also what run_dlmuse.yaml's results.per_subject declares and what every
+    # other consumer of dlmuse_seg/ matches (--mask_suffix _DLMUSE). One of the
+    # two is wrong and the suffix needs checking against the container's
+    # --infer-mrids behaviour before either is written down here; declaring the
+    # flag's value would encode a suspected bug as the expectation.
   demog_csv:
     type: file
+    csv_columns: [MRID]
 
 outputs:
   nichart_dlwmls_out:

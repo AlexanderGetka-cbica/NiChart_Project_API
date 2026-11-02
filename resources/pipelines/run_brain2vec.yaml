@@ -13,6 +13,7 @@ docs_id: brain2vec
 
 input_notes:
   - "Upload raw (unprocessed) T1 images — not skull-stripped, bias-corrected or registered T1s."
+  - "This pipeline skull-strips and aligns your scans for you; upload the raw images as they came off the scanner."
 
 categories:
   - image-processing
@@ -22,10 +23,48 @@ requires:
   - needs_T1
 
 steps:
+  # ── Preprocessing ───────────────────────────────────────────────────────────
+  # Brain2Vec is trained on skull-stripped scans affinely aligned to its own
+  # template (upstream: preprocessing/brain2vec_preprocess.py). That template is
+  # byte-identical to the ICBM152 DLICV template already baked into
+  # cbica/nifti-align-to-mni, so the existing DLMUSE -> binarize -> align chain
+  # produces the same product and no Brain2Vec-specific preprocessing container
+  # is needed. Alignment is the same SimpleITK affine step run_bascores uses, with
+  # the mask taken from the DLMUSE segmentation so DLMUSE is not run twice. The
+  # step id and output path match run_bascores so both pipelines share the cached
+  # alignment. Validated on 30 IXI subjects: brain age r=0.929 / MAE 5.96 y from
+  # aligned input, vs r=-0.024 / MAE 17.80 y from raw T1 (worse than guessing the
+  # cohort mean). Upstream preprocesses with FSL FLIRT rather than SimpleITK, so
+  # the residual +4.3 y bias on that cohort may be partly a registration
+  # difference -- to be raised with the Brain2Vec authors.
+  - id: run_dlmuse
+    tool: nichart_dlmuse
+    inputs:
+      t1_img: ${STUDY}/t1
+    outputs:
+      dlmuse_vol: ${STUDY}/dlmuse_vol
+      dlmuse_seg: ${STUDY}/dlmuse_seg
+
+  - id: binarize_dlmuse_to_dlicv
+    tool: binarize_seg_to_mask
+    inputs:
+      seg_dir: ${STUDY}/dlmuse_seg
+    outputs:
+      mask_dir: ${STUDY}/dlicv_mask
+
+  - id: align_dlicv_to_mni
+    tool: dlicv_to_mni
+    inputs:
+      img_dir: ${STUDY}/t1
+      mask_dir: ${STUDY}/dlicv_mask
+    outputs:
+      mni_dir: ${STUDY}/t1_mni
+
+  # ── Inference ───────────────────────────────────────────────────────────────
   - id: run_brain2vec
     tool: brain2vec
     inputs:
-      t1_img: ${STUDY}/t1
+      t1_img: ${STUDY}/t1_mni
     outputs:
       out_csv: ${STUDY}/brain2vec/Brain2Vec_Embeddings.csv
     params: {}

@@ -215,3 +215,82 @@ def test_dlwmls_pipelines_declare_roi_label_map(yaml_path):
     batch_features = (data.get("results") or {}).get("batch_features") or {}
     assert batch_features.get("label_map") == "atlases/muse/muse_mapping_derived.csv"
     assert batch_features.get("column_template") == "DL_WMLS_Volume_{id}"
+
+
+# ── Declared slot contents ────────────────────────────────────────────────────
+
+def test_annotated_tools_declare_parseable_contents():
+    """Every `contents` rule loads into a ContentRule with a usable pattern."""
+    from app.config import Settings
+    from app.services import catalog_service
+
+    settings = Settings()
+    annotated = 0
+    for yaml_path in sorted(settings.tools_path.glob("*.yaml")):
+        spec = catalog_service.load_tool_spec(settings.tools_path, yaml_path.stem)
+        for table in (spec.input_contents, spec.output_contents):
+            for label, rules in table.items():
+                assert rules, f"{yaml_path.stem}.{label} declared an empty rule list"
+                for rule in rules:
+                    annotated += 1
+                    # pattern None is the file-slot form and must carry columns.
+                    if rule.pattern is None:
+                        assert rule.csv_columns, (
+                            f"{yaml_path.stem}.{label}: a file slot rule must "
+                            "declare csv_columns"
+                        )
+                    else:
+                        assert not rule.pattern.startswith("/"), (
+                            f"{yaml_path.stem}.{label}: pattern must be relative"
+                        )
+    assert annotated > 0, "expected at least one annotated tool"
+
+
+def test_per_subject_patterns_agree_with_tool_declared_contents():
+    """scripts/check_pipeline_tool_filenames.py cross-checks the two places a
+    per-subject filename is written down. It must pass on the repo as it is."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "scripts/check_pipeline_tool_filenames.py"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "per-subject pattern(s)" in result.stdout
+
+
+def test_checker_detects_a_per_subject_pattern_that_drifts(tmp_path):
+    """Pin the guard itself: if a pipeline's per_subject pattern stops matching
+    what the producing tool declares it writes, the check must fail."""
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    sandbox = tmp_path / "repo"
+    (sandbox / "scripts").mkdir(parents=True)
+    shutil.copy(
+        repo / "scripts" / "check_pipeline_tool_filenames.py",
+        sandbox / "scripts" / "check_pipeline_tool_filenames.py",
+    )
+    shutil.copytree(repo / "resources", sandbox / "resources")
+
+    pipeline = sandbox / "resources" / "pipelines" / "run_dlmuse.yaml"
+    pipeline.write_text(
+        pipeline.read_text().replace(
+            "dlmuse_seg/{MRID}_DLMUSE.nii.gz",
+            "dlmuse_seg/{MRID}_SOMETHING_ELSE.nii.gz",
+        )
+    )
+
+    result = subprocess.run(
+        [sys.executable, "scripts/check_pipeline_tool_filenames.py"],
+        cwd=sandbox, capture_output=True, text=True,
+    )
+    assert result.returncode == 1, result.stdout
+    assert "content mismatch" in result.stdout
+    assert "_SOMETHING_ELSE.nii.gz" in result.stdout

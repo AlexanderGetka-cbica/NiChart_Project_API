@@ -10,6 +10,11 @@ inputs:
 outputs:
   synthseg_seg:
     type: directory
+    # Matches results.per_subject in run_synthseg.yaml.
+    contents:
+      - pattern: "{MRID}_synthseg.nii.gz"
+        per_subject: true
+  # synthseg_vol: naming not yet verified against the container; left undeclared.
   synthseg_vol:
     type: directory
 
@@ -36,4 +41,6 @@ time_per_subject_seconds: 240.0  # estimate — --parc adds a parcellation netwo
 
 container:
   image: cbica/synthseg:conda-0.3-wrapped-gpu
+  # Apptainer/Singularity: command begins with a mount path, which is a positional arg to run_wrapper.sh.
+  singularity_run_mode: run
   command: "{t1_img} {synthseg_seg} {synthseg_vol}"

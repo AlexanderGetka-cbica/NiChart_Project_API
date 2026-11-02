@@ -4,12 +4,18 @@ description: Harmonizes DLMUSE ROI volumes to a large reference dataset using Co
 inputs:
   dlmuse_vol_unharmonized:
     type: file
+    # Required by the container's wrapper, which fails fast without them.
+    csv_columns: [MRID, DL_MUSE_Volume_702]
   covariate_csv:
     type: file
+    csv_columns: [MRID, Age, Sex]
 
 outputs:
   dlmuse_vol_harmonized:
     type: directory
+    contents:
+      - pattern: "DLMUSE_Volumes.csv"
+        csv_columns: [MRID]
 
 mounts:
   dlmuse_vol_unharmonized:

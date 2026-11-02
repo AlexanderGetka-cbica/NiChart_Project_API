@@ -31,6 +31,7 @@ from app.models.files import (
     ParticipantsList,
 )
 from app.models.projects import Project
+from app.services import s3_sync_service
 from app.services.path_security import (
     PathEscapeError,
     assert_safe_path,
@@ -55,6 +56,44 @@ def resolve_project(settings: Settings, user: CurrentUser, project_id: str) -> P
     if not pdir.is_dir():
         raise HTTPException(404, f"Project '{project_id}' not found")
     return pdir
+
+
+async def publish_uploads(
+    settings: Settings, user: CurrentUser, project_id: str, project_path: Path
+) -> None:
+    """Push freshly uploaded project data to S3 before the request returns.
+
+    What the user uploads is canonical. In cloud mode a pipeline run begins by
+    syncing the project *down* from S3 (see ``job_service._run_pipeline``), and
+    that download overwrites any local file whose size or ETag differs from the
+    remote object. So an upload that only ever lands on local disk is silently
+    reverted at submit time whenever S3 already holds an older copy of the same
+    path — the new participants.csv, or a manually supplied intermediate, is
+    replaced by the stale version and the run proceeds on it with no error.
+
+    Pushing here closes that window: once local and S3 agree, the pre-run
+    download has nothing to revert and the pre-step upload carries the data on
+    to the compute node as usual.
+
+    A failure is raised to the caller as 502 rather than swallowed. Reporting
+    success for an upload that a later run would discard is the failure mode
+    this exists to prevent.
+
+    No-op outside cloud mode, or when no data bucket is configured.
+    """
+    if settings.execution_mode != "cloud" or not settings.s3_data_bucket:
+        return
+    prefix = s3_sync_service.project_prefix(
+        settings.s3_data_prefix, user.sub, project_id
+    )
+    try:
+        await s3_sync_service.sync_to_s3(project_path, settings.s3_data_bucket, prefix)
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            "Upload was written locally but could not be saved to cloud storage, "
+            f"so it is not safe to use in a run yet: {exc}",
+        )
 
 
 # ── Project CRUD ──────────────────────────────────────────────────────────────

@@ -20,6 +20,8 @@ resources:
 
 container:
   image: "alpine:3.19"
+  # Apptainer/Singularity: image declares no entrypoint; the command begins with 'sh'.
+  singularity_run_mode: exec
   command: "sh -c 'echo \"[test_sleep] starting, will sleep {duration_seconds}s\"; sleep {duration_seconds}; echo \"[test_sleep] done\"; echo placeholder-output > /output/result.txt'"
 
 parameters:

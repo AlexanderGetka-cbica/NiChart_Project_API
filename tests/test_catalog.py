@@ -147,13 +147,17 @@ def test_input_notes_in_pipeline_list(local_client):
     assert resp.status_code == 200
     by_id = {p["id"]: p for p in resp.json()}
 
-    assert by_id["run_brain2vec"]["input_notes"] == [_RAW_T1_NOTE]
+    notes = by_id["run_brain2vec"]["input_notes"]
+    # The raw-T1 note must be present; the pipeline also carries a second note
+    # explaining that it preprocesses the scans itself.
+    assert _RAW_T1_NOTE in notes
+    assert len(notes) >= 1
 
 
 def test_input_notes_in_pipeline_detail(local_client):
     resp = local_client.get("/catalog/pipelines/run_brain2vec")
     assert resp.status_code == 200
-    assert resp.json()["input_notes"] == [_RAW_T1_NOTE]
+    assert _RAW_T1_NOTE in resp.json()["input_notes"]
 
 
 def test_input_notes_default_empty(local_client):
@@ -181,3 +185,35 @@ def test_malformed_input_notes_are_ignored():
     assert _parse_input_notes([]) == []
     assert _parse_input_notes(["  ", ""]) == []             # blanks dropped
     assert _parse_input_notes([" keep me ", 42]) == ["keep me", "42"]
+
+
+# ── Singularity run-mode invariant ────────────────────────────────────────────
+
+def test_ambiguous_commands_declare_singularity_run_mode():
+    """A command not starting with '-' must state run vs exec explicitly.
+
+    The Singularity backend auto-detects: "run" when the rendered command starts
+    with '-' (clearly arguments to an entrypoint), otherwise "exec". That guess
+    is wrong for every tool whose command is entrypoint arguments that happen to
+    begin with a word — a dispatcher subcommand ('brain2vec', 'vit_ba'), a mount
+    path (synthseg), or a script path handed to a 'python' entrypoint. Those ran
+    fine on Docker and Batch and would have failed only on SLURM, so the rule is
+    enforced here rather than left to be discovered per tool.
+    """
+    import yaml
+    from pathlib import Path
+    from app.config import Settings
+
+    offenders = []
+    for path in sorted(Settings().tools_path.glob("*.yaml")):
+        container = (yaml.safe_load(path.read_text()) or {}).get("container") or {}
+        command = (container.get("command") or "").strip()
+        if not command or command.startswith("-"):
+            continue  # auto-detection is reliable for these
+        if container.get("singularity_run_mode") not in ("run", "exec"):
+            offenders.append(path.stem)
+
+    assert not offenders, (
+        "these tools' commands do not start with '-', so Singularity would guess "
+        f"'exec'; declare container.singularity_run_mode explicitly: {offenders}"
+    )

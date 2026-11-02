@@ -398,6 +398,16 @@ def _download_sync(bucket: str, prefix: str, local_dir: Path) -> int:
     return downloaded
 
 
+def project_prefix(top_prefix: str, user_id: str, project_name: str) -> str:
+    """Full S3 prefix for one user's project.
+
+    The single definition of the remote layout, shared by the pipeline
+    orchestrator and the upload routes so the two cannot disagree about where a
+    project lives.
+    """
+    return f"{top_prefix}/{user_id}/{project_name}"
+
+
 async def sync_to_s3(local_dir: Path, bucket: str, prefix: str) -> None:
     """Upload project files from local_dir to s3://bucket/prefix/. Non-blocking."""
     n = await _sync_with_retry("up", _upload_sync, local_dir, bucket, prefix)

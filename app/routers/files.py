@@ -239,7 +239,9 @@ async def commit_nifti(
     settings: Settings = Depends(get_settings),
 ) -> NiftiCommitResult:
     pdir = file_service.resolve_project(settings, user, project_id)
-    return file_service.commit_nifti_staging(pdir, staging_id, body.mappings)
+    result = file_service.commit_nifti_staging(pdir, staging_id, body.mappings)
+    await file_service.publish_uploads(settings, user, project_id, pdir)
+    return result
 
 
 # ── Staging discard ───────────────────────────────────────────────────────────
@@ -283,6 +285,7 @@ async def upload_csv(
     contents = await file.read()
     usage_service.record_upload("csv", settings.execution_mode, files=1, total_bytes=len(contents))
     file_service.store_csv_upload(pdir, contents, file.filename or "")
+    await file_service.publish_uploads(settings, user, project_id, pdir)
 
 
 # ── BIDS upload ───────────────────────────────────────────────────────────────
@@ -309,6 +312,7 @@ async def upload_bids(
     contents = await file.read()
     usage_service.record_upload("bids", settings.execution_mode, files=1, total_bytes=len(contents))
     file_service.store_bids_upload(pdir, contents, file.filename or "")
+    await file_service.publish_uploads(settings, user, project_id, pdir)
 
 
 @router.post(
@@ -336,6 +340,7 @@ async def upload_bids_files(
         files=len(pairs), total_bytes=sum(len(d) for _n, d in pairs),
     )
     file_service.store_bids_files(pdir, pairs)
+    await file_service.publish_uploads(settings, user, project_id, pdir)
 
 
 # ── IDAT upload ───────────────────────────────────────────────────────────────
@@ -357,6 +362,7 @@ async def upload_idat(
     contents = await file.read()
     usage_service.record_upload("idat", settings.execution_mode, files=1, total_bytes=len(contents))
     file_service.store_idat_upload(pdir, contents, file.filename or "")
+    await file_service.publish_uploads(settings, user, project_id, pdir)
 
 
 @router.post(
@@ -383,6 +389,7 @@ async def upload_idat_files(
         files=len(pairs), total_bytes=sum(len(d) for _n, d in pairs),
     )
     file_service.store_idat_files(pdir, pairs)
+    await file_service.publish_uploads(settings, user, project_id, pdir)
 
 
 # ── Participants ──────────────────────────────────────────────────────────────
@@ -447,6 +454,7 @@ async def update_participants(
 ) -> None:
     pdir = file_service.resolve_project(settings, user, project_id)
     file_service.write_participants(pdir, body.rows)
+    await file_service.publish_uploads(settings, user, project_id, pdir)
 
 
 # ── Readiness check ───────────────────────────────────────────────────────────

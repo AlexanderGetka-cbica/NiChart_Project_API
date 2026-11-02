@@ -26,6 +26,43 @@ class ParameterSpec(BaseModel):
     max: float | None = Field(default=None, description="Maximum value (numeric types only).")
 
 
+class SlotContentRule(BaseModel):
+    """One expected-content rule for a tool's directory slot.
+
+    Declares what a directory normally holds, so that a directory populated by
+    something other than the producing tool — a manual intermediate upload —
+    can be checked against the same expectation. Without such a declaration the
+    naming convention exists only inside the tool's ``command`` string (e.g.
+    ``--dlmuse_suff _DLMUSE.nii.gz``) and nothing can verify it.
+
+    Uses the same ``{MRID}`` placeholder as a pipeline's
+    ``results.per_subject[].pattern``; the two are cross-checked by
+    scripts/check_pipeline_tool_filenames.py so they cannot drift apart.
+    """
+
+    pattern: str = Field(
+        description=(
+            "Expected file name relative to the slot directory. ``{MRID}`` is "
+            "substituted per subject; any other character is matched as a glob, "
+            "so ``*.nii.gz`` is also valid."
+        )
+    )
+    per_subject: bool = Field(
+        default=False,
+        description=(
+            "True when one matching file is expected for every subject in the "
+            "project. False for a single fixed file such as a summary CSV."
+        ),
+    )
+    csv_columns: list[str] | None = Field(
+        default=None,
+        description=(
+            "Column names the file must contain when parsed as CSV. "
+            "Null for non-CSV files."
+        ),
+    )
+
+
 class IOField(BaseModel):
     """An input or output slot on a tool."""
 
@@ -41,6 +78,23 @@ class IOField(BaseModel):
             "'directory_union_csv_concat': same as directory_union, but CSV files with matching "
             "names across chunks are row-concatenated (header kept once). "
             "'csv_concat': concatenate a single CSV file output."
+        ),
+    )
+    contents: list[SlotContentRule] | None = Field(
+        default=None,
+        description=(
+            "Files this directory slot is expected to hold. Declared on "
+            "directory slots only; omit for file slots, which use "
+            "``csv_columns`` instead. Null when the tool declares nothing, "
+            "in which case an upload to this slot is checked only against the "
+            "paths the consuming pipeline steps actually read."
+        ),
+    )
+    csv_columns: list[str] | None = Field(
+        default=None,
+        description=(
+            "For a file slot: column names the file must contain when parsed "
+            "as CSV. Null for non-CSV file slots and for directory slots."
         ),
     )
 

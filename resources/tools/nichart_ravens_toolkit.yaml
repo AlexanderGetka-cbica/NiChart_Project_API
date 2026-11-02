@@ -19,6 +19,12 @@ inputs:
 outputs:
   ravens_out:
     type: directory
+    # Matches results.per_subject in run_nichart_ravens_toolkit.yaml.
+    contents:
+      - pattern: "{MRID}_Label_GM_RAVENS.nii.gz"
+        per_subject: true
+      - pattern: "{MRID}_Warped.nii.gz"
+        per_subject: true
 
 mounts:
   t1_img:
@@ -49,7 +55,9 @@ time_per_subject_seconds: 600
 
 container:
   image: cbica/ravenstoolkit-wrapped:0.1.0
-  command: >
+  # Apptainer/Singularity: entrypoint is 'python'; the command is the script path it runs.
+  singularity_run_mode: run
+  command: >-
     /opt/nichart/run_wrapper.py
     --t1-dir {t1_img}
     --seg-dir {dlmuse_seg}

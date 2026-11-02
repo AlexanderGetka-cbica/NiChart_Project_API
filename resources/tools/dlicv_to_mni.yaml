@@ -6,10 +6,18 @@ inputs:
     type: directory
   mask_dir:
     type: directory
+    # Required by this tool's own --mask_suffix _DLMUSE.
+    contents:
+      - pattern: "{MRID}_DLMUSE.nii.gz"
+        per_subject: true
 
 outputs:
   mni_dir:
     type: directory
+    # Observed output of cbica/nifti-align-to-mni:0.0.1.
+    contents:
+      - pattern: "{MRID}_DLICV_aligned.nii.gz"
+        per_subject: true
 
 mounts:
   img_dir:
@@ -29,7 +37,11 @@ resources:
   memory: 14000
   gpus: 0
 
-time_per_subject_seconds: null
+# Measured 2026-10-27 on cbica/nifti-align-to-mni:0.0.1, 30 IXI subjects:
+# 262 s between the first and last output write => ~9 s/subject for the affine
+# registration, plus a few seconds of container start. CPU-bound (SimpleITK).
+fixed_seconds: 5
+time_per_subject_seconds: 9.0
 
 container:
   image: cbica/nifti-align-to-mni:0.0.1

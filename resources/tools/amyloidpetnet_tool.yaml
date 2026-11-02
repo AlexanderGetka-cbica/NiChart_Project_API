@@ -33,7 +33,9 @@ time_per_subject_seconds: null
 
 container:
   image: cbica/amyloidpetnet:0.0.1
-  command: >
+  # Apptainer/Singularity: entrypoint is 'micromamba run -n p3.7torch1.8 python'; the script's own shebang is base python3, so exec would run it outside the conda env.
+  singularity_run_mode: run
+  command: >-
     /app/scripts/nichart_predict_wrapper.py
     --input-dir {input_data}
     --output-dir {output_data}

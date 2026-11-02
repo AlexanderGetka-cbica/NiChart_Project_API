@@ -50,7 +50,9 @@ time_per_subject_seconds: 180
 
 container:
   image: cbica/ravenstoolkit-wrapped:0.1.0-fireants
-  command: >
+  # Apptainer/Singularity: same wrapper shape as nichart_ravens_toolkit (python entrypoint + script path).
+  singularity_run_mode: run
+  command: >-
     /opt/nichart/run_wrapper.py
     --t1-dir {t1_img}
     --seg-dir {dlmuse_seg}

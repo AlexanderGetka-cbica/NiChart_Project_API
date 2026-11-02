@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
-from app.backends.base import MountSpec, ToolSpec
+from app.backends.base import ContentRule, MountSpec, ToolSpec
 from app.models.results import FeatureDefinition
 from app.models.catalog import (
     CentileFeatureMetadataResponse,
@@ -379,6 +379,40 @@ def get_pipeline(
     )
 
 
+def _parse_slot_contents(slots: dict | None) -> dict[str, list[ContentRule]]:
+    """Normalise each slot's declared contents into ``ContentRule`` objects.
+
+    Directory slots declare a ``contents`` list; file slots may instead declare
+    ``csv_columns`` directly, which becomes a single rule whose ``pattern`` is
+    None (meaning "the slot's own file"). Slots that declare nothing are absent
+    from the result rather than present-but-empty, so "undeclared" stays
+    distinguishable from "declared as holding nothing".
+    """
+    result: dict[str, list[ContentRule]] = {}
+    for label, spec in (slots or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        rules: list[ContentRule] = []
+        for raw in spec.get("contents") or []:
+            if not isinstance(raw, dict) or not raw.get("pattern"):
+                continue
+            cols = raw.get("csv_columns")
+            rules.append(ContentRule(
+                pattern=str(raw["pattern"]),
+                per_subject=bool(raw.get("per_subject", False)),
+                csv_columns=tuple(cols) if cols else None,
+            ))
+        if spec.get("csv_columns"):
+            rules.append(ContentRule(
+                pattern=None,
+                per_subject=False,
+                csv_columns=tuple(spec["csv_columns"]),
+            ))
+        if rules:
+            result[label] = rules
+    return result
+
+
 def load_tool_spec(tools_path: Path, tool_id: str) -> ToolSpec:
     """Load a tool YAML into the internal ToolSpec used by job backends."""
     yaml_path = tools_path / f"{tool_id}.yaml"
@@ -410,6 +444,8 @@ def load_tool_spec(tools_path: Path, tool_id: str) -> ToolSpec:
     }
 
     return ToolSpec(
+        input_contents=_parse_slot_contents(data.get("inputs")),
+        output_contents=_parse_slot_contents(data.get("outputs")),
         tool_id=tool_id,
         name=data["name"],
         image=data["container"]["image"],

@@ -27,9 +27,19 @@ def _step(step_id, tool, inputs, outputs, params=None, name=None):
     )
 
 
-# nichart_dlmuse declares time_per_subject_seconds 120; ravens_toolkit_fireants 180.
-TOOL_A, TPS_A = "nichart_dlmuse", 120.0
-TOOL_B, TPS_B = "nichart_ravens_toolkit_fireants", 180.0
+# Two tools that declare timing. The figures are read from the specs rather than
+# hardcoded: they are measured values that get revised, and pinning them here
+# meant a timing correction broke unrelated planner tests.
+TOOL_A = "nichart_dlmuse"
+TOOL_B = "nichart_ravens_toolkit_fireants"
+
+
+def _cost(tool: str, subjects: int) -> float:
+    """What the planner should estimate for this tool at this subject count."""
+    from app.config import Settings
+    from app.services import catalog_service
+    spec = catalog_service.load_tool_spec(Settings().tools_path, tool)
+    return (spec.fixed_seconds or 0.0) + (spec.time_per_subject_seconds or 0.0) * subjects
 
 
 @pytest.fixture
@@ -118,9 +128,9 @@ def test_nothing_has_run_so_everything_runs(study, tools_path):
     # step_a sees 2 T1s; step_b's input dir is empty on disk but step_a will fill
     # it, so step_b is credited with the same 2 (see the look-ahead tests below).
     assert steps[0].subjects == 2 and steps[1].subjects == 2
-    assert steps[0].estimated_seconds == TPS_A * 2
-    assert steps[1].estimated_seconds == TPS_B * 2
-    assert total == TPS_A * 2 + TPS_B * 2
+    assert steps[0].estimated_seconds == _cost(TOOL_A, 2)
+    assert steps[1].estimated_seconds == _cost(TOOL_B, 2)
+    assert total == _cost(TOOL_A, 2) + _cost(TOOL_B, 2)
     assert full == total           # nothing reused, so the two agree
 
 
@@ -154,7 +164,7 @@ def test_touching_an_input_carries_downstream(study, tools_path):
     assert steps[1].reason == "upstream step will re-run"
     # step_b inherits the grown cohort, not out_a/'s stale size.
     assert steps[1].subjects == 3
-    assert total == TPS_A * 3 + TPS_B * 3
+    assert total == _cost(TOOL_A, 3) + _cost(TOOL_B, 3)
 
 
 def test_downstream_rule_matches_nested_paths(study, tools_path):
@@ -216,9 +226,9 @@ def test_mixed_timing_totals_only_the_known_steps(study, tools_path):
     ]
     steps, total, _full = _plan(study, chain, tools_path)
 
-    assert steps[0].estimated_seconds == TPS_A * 2
+    assert steps[0].estimated_seconds == _cost(TOOL_A, 2)
     assert steps[1].estimated_seconds is None
-    assert total == TPS_A * 2, "the timed step still counts"
+    assert total == _cost(TOOL_A, 2), "the timed step still counts"
 
 
 def test_in_flight_sibling_is_flagged_not_reused(study, tools_path, monkeypatch):
@@ -256,7 +266,7 @@ def test_start_from_step_forces_and_skips(study, tools_path):
     assert steps[0].estimated_seconds == 0 and steps[0].reason is None
     assert steps[1].reason == "start step always runs"
     assert steps[2].reason == "upstream step will re-run"
-    assert total == TPS_B * steps[1].subjects + TPS_B * steps[2].subjects
+    assert total == _cost(TOOL_B, steps[1].subjects) + _cost(TOOL_B, steps[2].subjects)
     assert full == total        # step_a excluded from the upper bound too
 
 
@@ -428,8 +438,8 @@ def test_downstream_steps_inherit_upstream_subject_count(study, tools_path):
 
     assert steps[0].subjects == 2
     assert steps[1].subjects == 2, "step_b should inherit step_a's predicted output size"
-    assert steps[1].estimated_seconds == TPS_B * 2
-    assert total == TPS_A * 2 + TPS_B * 2
+    assert steps[1].estimated_seconds == _cost(TOOL_B, 2)
+    assert total == _cost(TOOL_A, 2) + _cost(TOOL_B, 2)
     assert full == total
 
 
@@ -549,7 +559,7 @@ def test_harmonized_spare_pipeline_total_is_no_longer_a_stub(study, tools_path):
         "nichart_dlmuse", "harmonize_dlmuse", "spare_all_harmonized"
     ]
     # dlmuse 120 s/subject x 2 subjects, harmonize ~60 s, spare 10 s.
-    assert steps[0].estimated_seconds == 240
+    assert steps[0].estimated_seconds == _cost('nichart_dlmuse', 2)
     # harmonize reads dlmuse_vol/DLMUSE_Volumes.csv — a file, so 1 subject.
     assert steps[1].subjects == 1
-    assert total == pytest.approx(240 + 60 + 0.008 * 1 + 10)
+    assert total == pytest.approx(_cost('nichart_dlmuse', 2) + 60 + 0.008 * 1 + 10)

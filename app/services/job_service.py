@@ -55,12 +55,18 @@ from app.backends.base import JobBackend, JobHandle
 from app.models.jobs import (
     RunPlanStep,
     ChunkStatus,
+    ManualUploadRecord,
     PipelineRunDetail,
     PipelineRunLogs,
     PipelineRunSummary,
     StepStatus,
 )
-from app.services import catalog_service, s3_sync_service, usage_service
+from app.services import (
+    catalog_service,
+    manual_upload_store,
+    s3_sync_service,
+    usage_service,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -112,6 +118,10 @@ class _RunRecord:
     cancelled: bool = False
     backend_type: str = ""  # e.g. "docker", "singularity", "slurm", "batch"
     start_from_step: str | None = None   # caller-requested start step, if any
+    # Manual intermediate uploads present when the run was submitted. Captured
+    # at submit rather than read live, so the record still describes what this
+    # run actually used after later uploads change the project.
+    manual_uploads: list[dict] = field(default_factory=list)
 
 
 # Set once at startup by load_runs_from_disk(); used by all persistence helpers.
@@ -211,8 +221,23 @@ def _cache_key(tool_id: str, inputs: dict, params: dict) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def _is_cached(metadata: dict, key: str, inputs: dict, outputs: dict) -> str | None:
-    """Return the originating run_id if the step is validly cached, else None."""
+def _is_cached(
+    metadata: dict,
+    key: str,
+    inputs: dict,
+    outputs: dict,
+    manual_overrides: list[tuple[Path, float]] | None = None,
+) -> str | None:
+    """Return the originating run_id if the step is validly cached, else None.
+
+    ``manual_overrides`` is ``(path, uploaded_at)`` for every manual
+    intermediate upload recorded in the project. A step whose output has been
+    replaced by hand is not validly cached however good its entry looks: the
+    files on disk are no longer the ones it produced. This is checked against
+    the step's *outputs*, not its inputs, and so it catches entries written
+    before cache records carried output paths — which is why it, rather than
+    entry deletion alone, is what makes the override guarantee hold.
+    """
     entry = metadata.get(key)
     if not entry or entry.get("status") != "success":
         return None
@@ -225,7 +250,53 @@ def _is_cached(metadata: dict, key: str, inputs: dict, outputs: dict) -> str | N
     for path_str in outputs.values():
         if not Path(path_str).exists():
             return None
+    if _manually_overridden(outputs, finished, manual_overrides):
+        return None
     return entry.get("run_id")
+
+
+def _manually_overridden(
+    outputs: dict,
+    finished: float,
+    manual_overrides: list[tuple[Path, float]] | None,
+) -> bool:
+    """True when a manual upload replaced one of *outputs* after *finished*."""
+    if not manual_overrides:
+        return False
+    out_paths = [Path(p) for p in outputs.values()]
+    return any(
+        uploaded_at > finished and any(_paths_overlap(out, up) for out in out_paths)
+        for up, uploaded_at in manual_overrides
+    )
+
+
+def clear_cache_entries_producing(study_dir: Path, slot_path: Path) -> list[str]:
+    """Drop cache entries whose recorded outputs overlap *slot_path*.
+
+    Called when a slot is populated by hand, so a later full run re-runs the
+    step that normally produces it instead of accepting the uploaded files as
+    its own output. Returns the keys removed.
+
+    Entries written before cache records carried output paths have nothing to
+    match on and are left alone; they are still prevented from being reused, by
+    the manual-upload check in ``_is_cached``. Clearing is the tidier half of
+    that guarantee, not the whole of it.
+    """
+    metadata = _load_metadata(study_dir)
+    removed = [
+        key
+        for key, entry in metadata.items()
+        if isinstance(entry, dict)
+        and any(
+            _paths_overlap(Path(out), slot_path)
+            for out in (entry.get("outputs") or {}).values()
+        )
+    ]
+    if removed:
+        for key in removed:
+            metadata.pop(key, None)
+        _save_metadata(study_dir, metadata)
+    return removed
 
 
 def _verify_outputs_present(resolved_outputs: dict[str, str]) -> str | None:
@@ -263,7 +334,11 @@ def _verify_outputs_present(resolved_outputs: dict[str, str]) -> str | None:
 
 
 def _explain_cache_miss(
-    metadata: dict, key: str, inputs: dict, outputs: dict
+    metadata: dict,
+    key: str,
+    inputs: dict,
+    outputs: dict,
+    manual_overrides: list[tuple[Path, float]] | None = None,
 ) -> str:
     """Short human-readable reason _is_cached() returned None.
 
@@ -284,11 +359,36 @@ def _explain_cache_miss(
     for path_str in outputs.values():
         if not Path(path_str).exists():
             return "outputs missing"
+    if _manually_overridden(outputs, finished, manual_overrides):
+        return "outputs replaced by a manual upload"
     return "cache entry no longer valid"
 
 
-def _mark_cached(metadata: dict, key: str, run_id: str) -> None:
-    metadata[key] = {"status": "success", "finished_time": time.time(), "run_id": run_id}
+def _mark_cached(
+    metadata: dict,
+    key: str,
+    run_id: str,
+    tool_id: str | None = None,
+    inputs: dict | None = None,
+    outputs: dict | None = None,
+) -> None:
+    """Record a successful step under its cache key.
+
+    The key is an opaque MD5 of tool/inputs/params, so the identifying fields
+    are stored alongside it: without them nothing can answer "which entry
+    produced dlmuse_vol/", which is what clearing an overridden step's entry
+    needs. Entries written before this existed simply lack the fields and are
+    skipped by that lookup — they are still invalidated, via the manual-upload
+    check in ``_is_cached``.
+    """
+    metadata[key] = {
+        "status": "success",
+        "finished_time": time.time(),
+        "run_id": run_id,
+        "tool_id": tool_id,
+        "inputs": dict(inputs) if inputs else {},
+        "outputs": dict(outputs) if outputs else {},
+    }
 
 
 # ── Parallel chunk helpers ────────────────────────────────────────────────────
@@ -585,6 +685,7 @@ def _run_to_dict(run: _RunRecord) -> dict:
         "cancelled": run.cancelled,
         "backend_type": run.backend_type,
         "start_from_step": run.start_from_step,
+        "manual_uploads": run.manual_uploads,
         "steps": [
             {
                 "step_id": s.step_id,
@@ -636,6 +737,7 @@ def _run_from_dict(d: dict) -> _RunRecord:
         cancelled=d.get("cancelled", False),
         backend_type=d.get("backend_type", ""),
         start_from_step=d.get("start_from_step"),
+        manual_uploads=d.get("manual_uploads") or [],
     )
     run.steps = [
         _StepRecord(
@@ -1004,7 +1106,9 @@ async def _run_pipeline_steps(
     # Compute the project-scoped S3 prefix once, used for all steps.
     _s3_project_prefix: str | None = None
     if s3_sync:
-        _s3_project_prefix = f"{s3_sync.prefix}/{run.user_id}/{study_dir.name}"
+        _s3_project_prefix = s3_sync_service.project_prefix(
+            s3_sync.prefix, run.user_id, study_dir.name
+        )
 
     if _s3_project_prefix:
         try:
@@ -1018,6 +1122,7 @@ async def _run_pipeline_steps(
             return
 
     metadata = _load_metadata(study_dir)
+    manual_overrides = manual_upload_store.override_paths(study_dir)
     step_outputs: dict[str, dict[str, str]] = {}
 
     for i, step_def in enumerate(pipeline_steps):
@@ -1079,7 +1184,9 @@ async def _run_pipeline_steps(
 
         # Check step cache (only for freshly-pending steps, not in-progress reconnects).
         if step.status == "pending" and reuse_cached_steps and not force_run:
-            cached_run_id = _is_cached(metadata, key, resolved_inputs, resolved_outputs)
+            cached_run_id = _is_cached(
+                metadata, key, resolved_inputs, resolved_outputs, manual_overrides
+            )
             if cached_run_id is not None:
                 step.status = "skipped"
                 step.skip_reason = "cached"
@@ -1441,7 +1548,12 @@ async def _run_pipeline_steps(
                         user_id=run.user_id,
                         backend=run.backend_type,
                     )
-                _mark_cached(metadata, key, run.run_id)
+                _mark_cached(
+                    metadata, key, run.run_id,
+                    tool_id=step_def.tool,
+                    inputs=resolved_inputs,
+                    outputs=resolved_outputs,
+                )
                 _save_metadata(study_dir, metadata)
                 if flight:
                     flight.resolve(True)
@@ -1543,7 +1655,12 @@ async def _run_pipeline_steps(
                 user_id=run.user_id,
                 backend=run.backend_type,
             )
-        _mark_cached(metadata, key, run.run_id)
+        _mark_cached(
+            metadata, key, run.run_id,
+            tool_id=step_def.tool,
+            inputs=resolved_inputs,
+            outputs=resolved_outputs,
+        )
         _save_metadata(study_dir, metadata)
         if flight:
             flight.resolve(True)
@@ -1739,8 +1856,14 @@ def create_pipeline_run(
     pipeline_id: str,
     pipeline_steps: list,
     start_from_step: str | None = None,
+    study_dir: Path | None = None,
 ) -> _RunRecord:
-    """Create and register a pipeline run record (does not start the task)."""
+    """Create and register a pipeline run record (does not start the task).
+
+    Any manual intermediate uploads present in the project are copied onto the
+    record now, so the run keeps saying which of its inputs were supplied by
+    hand even after later uploads change the project.
+    """
     run_id = str(uuid.uuid4())
     run = _RunRecord(
         run_id=run_id,
@@ -1750,6 +1873,10 @@ def create_pipeline_run(
         total_steps=len(pipeline_steps),
         steps=[_StepRecord(step_id=s.id, tool_id=s.tool) for s in pipeline_steps],
         start_from_step=start_from_step,
+        manual_uploads=(
+            manual_upload_store.records_for_response(study_dir)
+            if study_dir is not None else []
+        ),
     )
     _save_run(run)
     return run
@@ -1800,6 +1927,7 @@ def _to_detail(run: _RunRecord) -> PipelineRunDetail:
         total_steps=run.total_steps,
         error=run.error,
         start_from_step=run.start_from_step,
+        manual_uploads=[ManualUploadRecord(**r) for r in run.manual_uploads],
         steps=[
             _step_record_to_status(s)
             for s in run.steps
@@ -2075,6 +2203,7 @@ def plan_pipeline_run(
     * **Nothing is written.** No run record, no cache metadata, no output dirs.
     """
     metadata = _load_metadata(study_dir)
+    manual_overrides = manual_upload_store.override_paths(study_dir)
     step_outputs: dict[str, dict[str, str]] = {}
 
     start_index = None
@@ -2151,7 +2280,9 @@ def plan_pipeline_run(
                 for inp in resolved_inputs.values()
                 for out_path, _count in rerun_outputs
             )
-            cached_run_id = _is_cached(metadata, key, resolved_inputs, resolved_outputs)
+            cached_run_id = _is_cached(
+                metadata, key, resolved_inputs, resolved_outputs, manual_overrides
+            )
             if cached_run_id is not None and not upstream_dirty:
                 action = "reuse"
                 cached_from = cached_run_id
@@ -2159,7 +2290,8 @@ def plan_pipeline_run(
                 reason = (
                     "upstream step will re-run" if cached_run_id is not None
                     else _explain_cache_miss(
-                        metadata, key, resolved_inputs, resolved_outputs
+                        metadata, key, resolved_inputs, resolved_outputs,
+                        manual_overrides,
                     )
                 )
                 rerun_outputs.extend((Path(p), subjects) for p in resolved_outputs.values())
@@ -2191,6 +2323,11 @@ def plan_pipeline_run(
             subjects_per_chunk=subjects_per_chunk,
             in_flight_elsewhere=in_flight and action == "run",
             missing_inputs=missing_inputs,
+            uses_manual_uploads=any(
+                _paths_overlap(Path(inp), up)
+                for inp in resolved_inputs.values()
+                for up, _ts in manual_overrides
+            ),
         ))
 
     def _total(costs: list[float | None]) -> float:

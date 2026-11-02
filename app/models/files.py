@@ -143,3 +143,199 @@ class ParticipantsUpdate(BaseModel):
             "Existing participants.csv is overwritten."
         )
     )
+
+
+# ── Manual intermediate uploads ───────────────────────────────────────────────
+#
+# Supports starting a pipeline from a later step when the user already holds the
+# earlier steps' results. See GET /projects/{id}/files/intermediate-inputs/{pipeline_id}.
+
+
+class SlotConsumer(BaseModel):
+    """A step that reads from a slot, and the exact path it reads."""
+
+    step_id: str = Field(description="Step that consumes this slot.")
+    input: str = Field(description="That step's input label.")
+    path: str = Field(
+        description=(
+            "Project-relative path the step actually reads. May be a file inside "
+            "a directory slot, e.g. 'dlmuse_vol/DLMUSE_Volumes.csv' for the "
+            "'dlmuse_vol' slot."
+        )
+    )
+
+
+class SlotContentRequirement(BaseModel):
+    """One file (or family of files) a slot must contain, and whether it does."""
+
+    pattern: str = Field(
+        description=(
+            "Expected file name relative to the slot. '{MRID}' stands for a "
+            "subject ID; anything else is matched as a glob."
+        )
+    )
+    per_subject: bool = Field(
+        description="True when one matching file is expected per project subject."
+    )
+    csv_columns: list[str] | None = Field(
+        default=None,
+        description="Columns the file must contain when parsed as CSV; null if not a CSV.",
+    )
+    source: Literal["pipeline_path", "tool_declared"] = Field(
+        description=(
+            "Where the requirement comes from. 'pipeline_path': a step at or after "
+            "the start step reads this exact path, so it must exist whatever any "
+            "tool declares. 'tool_declared': the producing tool's output contents "
+            "or a consuming tool's input contents."
+        )
+    )
+    status: Literal["met", "missing", "invalid"] = Field(
+        description=(
+            "'met': satisfied. 'missing': no matching file. 'invalid': a file "
+            "matched but failed its check, e.g. missing a required CSV column."
+        )
+    )
+    problem: str | None = Field(
+        default=None,
+        description="Plain-text explanation when status is not 'met'; shown verbatim.",
+    )
+
+
+class SlotCoverage(BaseModel):
+    """Per-subject coverage of a slot that has at least one per-subject rule."""
+
+    expected_subjects: int | None = Field(
+        description=(
+            "Number of subjects expected. Null when the project has neither "
+            "imaging nor a participants.csv, so the expected set is unknowable — "
+            "the normal case for a project whose raw data was never uploaded. "
+            "Coverage is then reported but not used to decide status."
+        )
+    )
+    matched: int = Field(description="Subjects for which every per-subject rule is satisfied.")
+    missing_mrids: list[str] = Field(
+        default_factory=list,
+        description="Expected subjects with no matching file. Empty when expected_subjects is null.",
+    )
+
+
+class ProjectInputHint(BaseModel):
+    """Which existing uploader a client should send the user to for a project input."""
+
+    type: Literal["modality", "participants", "idat", "other"] = Field(
+        description="Kind of project input this path holds."
+    )
+    code: str | None = Field(
+        default=None,
+        description="Modality code when type is 'modality' (e.g. 't1'); null otherwise.",
+    )
+
+
+class IntermediateSlot(BaseModel):
+    """One pipeline path needed by the steps that will run, and its state on disk."""
+
+    slot_id: str = Field(
+        description=(
+            "Opaque identifier, stable for a given (pipeline, start step). Pass it "
+            "back verbatim when uploading. Never a path — the server derives the "
+            "destination itself."
+        )
+    )
+    path: str = Field(
+        description="Project-relative path, '${STUDY}/' stripped. Display only."
+    )
+    type: Literal["directory", "file"] = Field(description="Whether the slot is a directory or a single file.")
+    kind: Literal["upload", "project_input", "generated"] = Field(
+        description=(
+            "'upload': produced by a skipped earlier step, so it may be supplied by "
+            "hand. 'project_input': raw project data that no step produces — use the "
+            "normal images/participants uploaders. 'generated': a step that will run "
+            "produces it, so it is shown but not checked."
+        )
+    )
+    produced_by_step: str | None = Field(
+        default=None,
+        description=(
+            "For 'upload', the skipped step that normally produces this slot. For "
+            "'generated', the step that will produce it. Null for 'project_input'."
+        ),
+    )
+    consumed_by: list[SlotConsumer] = Field(
+        default_factory=list,
+        description="Steps at or after the start step that read this slot.",
+    )
+    project_input_hint: ProjectInputHint | None = Field(
+        default=None, description="Set only when kind is 'project_input'."
+    )
+    required_contents: list[SlotContentRequirement] = Field(
+        default_factory=list,
+        description="What the slot must hold. Empty for 'generated' slots and for undeclared project inputs.",
+    )
+    present: bool = Field(description="True when the slot exists on disk and is not empty.")
+    coverage: SlotCoverage | None = Field(
+        default=None, description="Null when the slot has no per-subject rule."
+    )
+    status: Literal["met", "partial", "missing"] = Field(
+        description=(
+            "'missing': absent or empty. 'met': every requirement satisfied and "
+            "coverage full (or no per-subject rule). 'partial': anything else."
+        )
+    )
+    problems: list[str] = Field(
+        default_factory=list,
+        description="Plain-text warnings about this slot, shown verbatim.",
+    )
+
+
+class IntermediateInputsResponse(BaseModel):
+    """Everything the steps from ``start_from_step`` onwards need, and its state."""
+
+    pipeline_id: str = Field(description="Pipeline these slots belong to.")
+    start_from_step: str = Field(description="Step the run would start from.")
+    slots: list[IntermediateSlot] = Field(
+        description=(
+            "One entry per distinct path the running steps need, in pipeline order. "
+            "Slots that no step at or after the start step reads are omitted. Empty "
+            "when the start step is the first step and nothing is skipped."
+        )
+    )
+
+
+class RejectedUploadFile(BaseModel):
+    """A file that was not written, and why."""
+
+    name: str = Field(description="Name as sent by the client.")
+    reason: str = Field(description="Plain-text reason, shown verbatim.")
+
+
+class IntermediateUploadResult(BaseModel):
+    """Outcome of one manual intermediate upload."""
+
+    slot: IntermediateSlot = Field(description="The slot's state after the upload.")
+    written: int = Field(description="Number of files written into the slot.")
+    rejected: list[RejectedUploadFile] = Field(
+        default_factory=list,
+        description=(
+            "Files not written because of a disallowed extension, an oversized "
+            "file, or an unexpected name. These do not fail the request unless "
+            "nothing valid remains."
+        ),
+    )
+    skipped: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files dropped as irrelevant rather than rejected: any path component "
+            "starting with '.' and anything under '__MACOSX/'. Not errors — "
+            "Finder-made archives almost always contain them."
+        ),
+    )
+    replaced: bool = Field(
+        default=False, description="True when the slot was cleared before writing."
+    )
+    cache_entries_cleared: int = Field(
+        default=0,
+        description=(
+            "Cache entries dropped because their outputs were replaced, so the "
+            "producing step will re-run on a normal full run."
+        ),
+    )

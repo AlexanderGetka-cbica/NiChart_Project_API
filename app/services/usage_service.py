@@ -54,7 +54,7 @@ _disabled = False
 # tasks, so without this a dispatched event can be garbage-collected mid-flight.
 _pending: set[asyncio.Task] = set()
 
-_UPLOAD_KINDS = frozenset({"nifti", "csv", "bids", "idat", "dicom"})
+_UPLOAD_KINDS = frozenset({"nifti", "csv", "bids", "idat", "dicom", "intermediate"})
 
 
 def _enabled() -> bool:

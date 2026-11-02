@@ -36,6 +36,7 @@ from app.services import (
     file_service,
     job_service,
     readiness_service,
+    retention_service,
     usage_service,
 )
 from app.services.job_service import S3SyncConfig
@@ -191,11 +192,22 @@ async def submit_pipeline(
         pipeline_id=body.pipeline_id,
         pipeline_steps=pipeline.steps,
         start_from_step=body.start_from_step,
+        study_dir=pdir,
     )
     usage_service.record_pipeline_run(
         body.pipeline_id,
         settings.execution_mode,
         subjects=len(file_service.collect_project_mrids(pdir)),
+    )
+    # Submitting a run is active use, so it resets the retention countdown.
+    # Done only once the submission has been accepted, so an invalid request
+    # cannot keep a project alive.
+    await retention_service.touch_project(
+        settings.s3_data_bucket,
+        settings.s3_data_prefix,
+        user.sub,
+        project_id,
+        activity="pipeline submission",
     )
     s3_sync: S3SyncConfig | None = None
     if settings.s3_data_bucket and settings.execution_mode == "cloud":

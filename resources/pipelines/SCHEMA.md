@@ -276,10 +276,33 @@ params, and finish time.
 
 A step is skipped (cache hit) when:
 - Its cache key `MD5(tool_id | json(inputs) | json(params))` matches a prior run, AND
-- All input paths have modification times earlier than the prior `finished_time`.
+- All input paths have modification times earlier than the prior `finished_time`, AND
+- All of its declared output paths still exist, AND
+- None of its outputs has been replaced by a manual intermediate upload since
+  `finished_time`.
 
 Cache reuse can be disabled per-submission via `reuse_cached_steps: false` in the
 submit request body.
+
+### Manual intermediate uploads and the cache
+
+A user who already holds part of a pipeline's results can supply a later step's
+inputs by hand (`POST /projects/{id}/files/upload/intermediate`) and start the run
+from that step. Such an upload is recorded in
+`{study}/_working/manual_uploads.json`.
+
+That record is the last condition above. A step whose output was written by hand
+did not produce what is now on disk, so reusing its cached result would adopt the
+uploaded files as that step's own output. Two mechanisms enforce this:
+
+- the upload drops any cache entry whose recorded outputs overlap the slot, so a
+  normal full run re-runs the producing step; and
+- the cache verdict itself rejects any entry — including one written before cache
+  records carried output paths — whose outputs a recorded upload has since replaced.
+
+Each cache entry therefore records `tool_id` and its resolved inputs and outputs
+alongside the key. Entries written before that was added still work; they simply
+cannot be matched by path, which is why the second mechanism exists.
 
 ---
 

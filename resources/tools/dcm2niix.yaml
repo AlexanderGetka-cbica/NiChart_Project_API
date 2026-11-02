@@ -19,6 +19,8 @@ resources:
   gpus: 0
 container:
   image: "xnat/dcm2niix:latest"
+  # Apptainer/Singularity: image declares no entrypoint; dcm2niix is on PATH at /usr/bin/dcm2niix.
+  singularity_run_mode: exec
   command: "dcm2niix -o /mnt/out -z y -f {mrid} /mnt/in"
 parameters:
   mrid:

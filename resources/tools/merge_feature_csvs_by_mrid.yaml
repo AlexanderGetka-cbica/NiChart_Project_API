@@ -4,12 +4,15 @@ description: Merges two feature CSVs on the MRID key, producing a single combine
 inputs:
   csv_1:
     type: file
+    csv_columns: [MRID]
   csv_2:
     type: file
+    csv_columns: [MRID]
 
 outputs:
   out_csv:
     type: file
+    csv_columns: [MRID]
 
 mounts:
   csv_1:
