@@ -23,11 +23,15 @@ inputs:
   <slot_label>:
     type: directory | file   # "directory" for folders, "file" for a single file.
     description: string      # Optional. Shown in the tool catalog.
+    contents: [...]          # Optional. Directory slots only — see "Declared contents".
+    csv_columns: [str]       # Optional. File slots only — columns the CSV must contain.
 
 outputs:
   <slot_label>:
     type: directory | file
     description: string      # Optional.
+    contents: [...]          # Optional. See "Declared contents" below.
+    csv_columns: [str]       # Optional. File slots only.
     merge: directory_union | directory_union_csv_concat | csv_concat
     # Required only when parallelizable: true (see below). Tells the orchestrator how to
     # merge this output across parallel chunks:
@@ -40,6 +44,42 @@ outputs:
     #   csv_concat                 — for a single file output that is a CSV; concatenates
     #                                rows across all chunks (header kept once).
     # Default when omitted: directory_union.
+
+# ── Declared contents ────────────────────────────────────────────────────────
+# Optional. What a slot is expected to hold, so that a directory populated by
+# something other than this tool can be checked against the same expectation.
+# Without it, the naming convention exists only inside the `command` string
+# (e.g. `--dlmuse_suff _DLMUSE.nii.gz`) and nothing can verify it.
+#
+# Used by the manual intermediate-upload feature: a user starting a pipeline
+# from a later step uploads a slot by hand, and these rules are what the upload
+# is validated against. Omitting `contents` keeps prior behaviour — the upload
+# is then checked only against the paths the consuming pipeline steps read.
+#
+#   outputs:
+#     dlmuse_seg:
+#       type: directory
+#       contents:
+#         - pattern: "{MRID}_DLMUSE.nii.gz"   # {MRID} = one subject; else glob
+#           per_subject: true                 # expect one per project subject
+#     dlmuse_vol:
+#       type: directory
+#       contents:
+#         - pattern: "DLMUSE_Volumes.csv"     # one fixed file for the cohort
+#           csv_columns: [MRID]               # must parse as CSV with these columns
+#
+# A file slot declares `csv_columns` directly instead of a `contents` list,
+# since there is only ever one file and its name is fixed by the mount.
+#
+# `{MRID}` is the same placeholder a pipeline's `results.per_subject[].pattern`
+# uses, and scripts/check_pipeline_tool_filenames.py asserts that the two agree
+# wherever both are declared — the tool declaration is what an upload is checked
+# against and the pipeline declaration is what the viewer fetches, so a
+# disagreement means one of them misdescribes the data on disk.
+#
+# Declare a pattern only where the real naming is known, from observed output or
+# from a flag in this tool's own command. A guessed pattern will reject valid
+# uploads, which is worse than declaring nothing.
 
 # ── Container mounts ─────────────────────────────────────────────────────────
 # Map each slot label to a path inside the container and an access mode.
@@ -68,11 +108,27 @@ resources:
   memory: <int>      # Memory in MiB. See https://docs.aws.amazon.com/batch/latest/APIReference/API_ResourceRequirement.html
   gpus: <int>        # 0 for CPU-only tools; 1 for tools that need a GPU.
 
-# ── Throughput hint ───────────────────────────────────────────────────────────
+# ── Timing hints ──────────────────────────────────────────────────────────────
 # Expected wall-clock seconds to process one subject.
 # Used by GET /cloud/status to estimate queue-drain time.
 # Use null for batch tools that don't scale linearly with subject count.
 time_per_subject_seconds: <float> | null
+
+# One-off seconds per invocation, independent of cohort size: container start,
+# model loading, interpreter warm-up. Optional.
+#
+# A run estimate is fixed_seconds + time_per_subject_seconds x subjects, with
+# either treated as 0 when absent. Declare at least one of the two, or
+# POST /projects/{id}/jobs/pipelines/plan reports the step as having no timing
+# at all and leaves it out of the total.
+#
+# Measure it at two cohort sizes and solve for the slope and intercept rather
+# than guessing: a startup-dominated tool given a per-subject-only figure will
+# have its long-cohort estimate wildly overstated. For example harmonize_dlmuse
+# measured 60.1 s at N=50 and 80.3 s at N=2485, i.e. ~60 s fixed plus
+# ~0.008 s/subject — expressing that as a per-subject number alone would have
+# predicted roughly 50 hours for 2485 subjects instead of 80 seconds.
+fixed_seconds: <float> | null
 
 # ── Parallelization ───────────────────────────────────────────────────────────
 # When true, the orchestrator splits directory inputs by MRID across multiple
@@ -183,6 +239,7 @@ resources:
   gpus: 0
 
 time_per_subject_seconds: null
+# fixed_seconds: 10            # Uncomment for a tool whose cost is mostly startup.
 
 parallelizable: false          # Set to true if each subject is processed independently.
 # subjects_per_chunk: 10       # Uncomment and tune if parallelizable: true.

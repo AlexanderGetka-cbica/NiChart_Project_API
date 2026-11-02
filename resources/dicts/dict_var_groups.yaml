@@ -58,6 +58,7 @@ group_dlmuse-vol:
   category: roi
   pipeline: [dlmuse]
   prefix: DL_MUSE_Volume_
+  atlas: muse
 
 group_dlwmls-vol:
   label: DLWMLS Volumes
@@ -65,3 +66,13 @@ group_dlwmls-vol:
   category: roi
   pipeline: [dlwmls]
   prefix: DL_WMLS_Volume_
+  atlas: muse
+
+group_synthseg-vol:
+  label: SynthSeg Volumes
+  desc: Volumes of ROIs segmented using SynthSeg
+  category: roi
+  pipeline: [synthseg]
+  # SynthSeg's CSV columns are the ROI names themselves (no prefix + index scheme)
+  prefix: ""
+  atlas: synthseg

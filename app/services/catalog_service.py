@@ -3,6 +3,7 @@ Catalog service — loads tool and pipeline YAML definitions from the resources 
 """
 
 import csv
+import logging
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
-from app.backends.base import MountSpec, ToolSpec
+from app.backends.base import ContentRule, MountSpec, ToolSpec
 from app.models.results import FeatureDefinition
 from app.models.catalog import (
     CentileFeatureMetadataResponse,
@@ -19,12 +20,15 @@ from app.models.catalog import (
     FeatureGroup,
     IOField,
     LabelInfo,
+    MinSubjectsSpec,
     ParameterSpec,
     PipelineDetail,
     PipelineStep,
     PipelineSummary,
     ResourceSpec,
     RoiList,
+    SubjectConstraintSpec,
+    SubjectPredicate,
     ToolDetail,
     ToolSummary,
     VarGroup,
@@ -74,6 +78,7 @@ def get_tool(tools_path: Path, tool_id: str) -> ToolDetail:
         resources=ResourceSpec(**data["resources"]),
         parameters={k: ParameterSpec(**v) for k, v in (data.get("parameters") or {}).items()},
         time_per_subject_seconds=data.get("time_per_subject_seconds"),
+        fixed_seconds=data.get("fixed_seconds"),
         parallelizable=bool(data.get("parallelizable", False)),
         subjects_per_chunk=data.get("subjects_per_chunk"),
         github_url=data.get("github_url"),
@@ -95,11 +100,90 @@ def list_tools(tools_path: Path) -> list[ToolSummary]:
     return result
 
 
+_log = logging.getLogger(__name__)
+
+
 def _parse_requires(raw: list | None) -> list[str]:
-    result = []
+    """Return the name of each requirement.
+
+    ``requires`` items are either plain strings (``needs_T1``) or single-key
+    dicts carrying structured detail (``{csv_has_columns: [...]}``). Only the
+    key is returned for the latter; the detail is exposed through dedicated
+    fields — ``column_schemas`` and ``min_subjects`` — so clients get a clean
+    list of requirement names to display rather than a stringified dict.
+    """
+    result: list[str] = []
     for item in raw or []:
-        result.append(item if isinstance(item, str) else str(item))
+        if isinstance(item, str):
+            result.append(item)
+        elif isinstance(item, dict):
+            result.extend(str(key) for key in item)
     return result
+
+
+def parse_min_subjects(raw_requires: list | None) -> MinSubjectsSpec | None:
+    """Extract the min_subjects requirement, resolving every default.
+
+    A constraint's ``required`` falls back to the pipeline's overall
+    ``required``; its ``recommended`` falls back to its own ``required`` when it
+    sets one, and to the pipeline's ``recommended`` when it does not. Resolving
+    here keeps one copy of those rules — readiness evaluation consumes the same
+    parsed spec.
+    """
+    for item in raw_requires or []:
+        if not isinstance(item, dict) or "min_subjects" not in item:
+            continue
+        spec = item.get("min_subjects") or {}
+        if not isinstance(spec, dict):
+            continue
+
+        required = int(spec.get("required", 1))
+        recommended = int(spec.get("recommended", required))
+
+        constraints: list[SubjectConstraintSpec] = []
+        for raw in spec.get("constraints") or []:
+            if not isinstance(raw, dict):
+                continue
+            predicates = [
+                SubjectPredicate(**p)
+                for p in (raw.get("where") or [])
+                if isinstance(p, dict) and p.get("column")
+            ]
+            child_required = int(raw.get("required", required))
+            child_recommended = int(
+                raw.get("recommended", raw.get("required", recommended))
+            )
+            constraints.append(SubjectConstraintSpec(
+                label=raw.get("label"),
+                where=predicates,
+                required=child_required,
+                recommended=child_recommended,
+            ))
+
+        return MinSubjectsSpec(
+            required=required,
+            recommended=recommended,
+            constraints=constraints,
+        )
+    return None
+
+
+def _parse_input_notes(raw: Any) -> list[str]:
+    """Normalise the optional ``input_notes`` block to a list of plain strings.
+
+    Notes are free-text warnings about input requirements that readiness checks
+    cannot verify, e.g. that a pipeline needs raw rather than preprocessed T1s.
+    A malformed value (a bare string, a mapping, anything not a list) is dropped
+    rather than raised: one bad note must not make a pipeline unlistable.
+    """
+    if not isinstance(raw, list):
+        if raw:
+            _log.warning(
+                "Ignoring 'input_notes': expected a list of strings, got %s",
+                type(raw).__name__,
+            )
+        return []
+    return [str(note).strip() for note in raw if str(note).strip()]
 
 
 def _parse_column_schemas(raw_requires: list | None) -> dict[str, ColumnSpec]:
@@ -160,7 +244,8 @@ def _build_catalog_features(
                 constituents = [int(c.strip()) for c in row[2:] if c.strip()]
                 if not constituents:
                     constituents = [label_id]
-                col_name = batch_spec.column_template.replace("{id}", str(label_id))
+                # {name}: atlases whose CSV columns are ROI names (e.g. SynthSeg).
+                col_name = batch_spec.column_template.replace("{id}", str(label_id)).replace("{name}", display_name)
                 unit = (batch_spec.column_units or {}).get(col_name, batch_spec.default_unit)
                 label_map[col_name] = LabelInfo(
                     display_name=display_name, label_ids=constituents, unit=unit
@@ -195,10 +280,34 @@ def _build_catalog_features(
     return label_map, feature_groups
 
 
+def _step_display_fields(
+    step_raw: dict,
+    tools_path: Path | None,
+    tool_cache: dict[str, dict],
+) -> tuple[str | None, str | None]:
+    """Resolve a step's display name/description: step YAML, then the tool's.
+
+    Never falls back to the raw step id — a null tells the client that no name
+    exists so it can decide what to show.
+    """
+    name = step_raw.get("name")
+    description = step_raw.get("description")
+    if (name and description) or tools_path is None:
+        return name, description
+
+    tool_id = step_raw.get("tool")
+    if tool_id and tool_id not in tool_cache:
+        tool_yaml = tools_path / f"{tool_id}.yaml"
+        tool_cache[tool_id] = _load_yaml(tool_yaml) if tool_yaml.exists() else {}
+    tool_data = tool_cache.get(tool_id, {})
+    return name or tool_data.get("name"), description or tool_data.get("description")
+
+
 def get_pipeline(
     pipelines_path: Path,
     pipeline_id: str,
     resources_path: Path | None = None,
+    tools_path: Path | None = None,
 ) -> PipelineDetail:
     if pipeline_id in _load_disabled_pipelines(pipelines_path):
         raise HTTPException(404, f"Pipeline '{pipeline_id}' not found")
@@ -207,6 +316,7 @@ def get_pipeline(
         raise HTTPException(404, f"Pipeline '{pipeline_id}' not found")
     data = _load_yaml(yaml_path)
     results_raw = data.get("results") or {}
+    _step_tool_cache: dict[str, dict] = {}
 
     def _res(rel: str | None) -> str | None:
         if not rel or resources_path is None:
@@ -241,13 +351,15 @@ def get_pipeline(
         base_variant=data.get("base_variant"),
         steps=[
             PipelineStep(
-                id=s["id"],
-                tool=s["tool"],
-                inputs=s.get("inputs") or {},
-                outputs=s.get("outputs") or {},
-                params=s.get("params") or {},
+                id=step_raw["id"],
+                name=_step_display_fields(step_raw, tools_path, _step_tool_cache)[0],
+                description=_step_display_fields(step_raw, tools_path, _step_tool_cache)[1],
+                tool=step_raw["tool"],
+                inputs=step_raw.get("inputs") or {},
+                outputs=step_raw.get("outputs") or {},
+                params=step_raw.get("params") or {},
             )
-            for s in (data.get("steps") or [])
+            for step_raw in (data.get("steps") or [])
         ],
         parameters={
             k: ParameterSpec(**v)
@@ -258,11 +370,47 @@ def get_pipeline(
         label_map=label_map,
         feature_groups=feature_groups,
         column_schemas=_parse_column_schemas(raw_requires),
+        min_subjects=parse_min_subjects(raw_requires),
         docs_id=data.get("docs_id"),
         root_pipeline=data.get("root_pipeline"),
         harmonized=bool(data.get("harmonized", False)),
         modalities=data.get("modalities") or [],
+        input_notes=_parse_input_notes(data.get("input_notes")),
     )
+
+
+def _parse_slot_contents(slots: dict | None) -> dict[str, list[ContentRule]]:
+    """Normalise each slot's declared contents into ``ContentRule`` objects.
+
+    Directory slots declare a ``contents`` list; file slots may instead declare
+    ``csv_columns`` directly, which becomes a single rule whose ``pattern`` is
+    None (meaning "the slot's own file"). Slots that declare nothing are absent
+    from the result rather than present-but-empty, so "undeclared" stays
+    distinguishable from "declared as holding nothing".
+    """
+    result: dict[str, list[ContentRule]] = {}
+    for label, spec in (slots or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        rules: list[ContentRule] = []
+        for raw in spec.get("contents") or []:
+            if not isinstance(raw, dict) or not raw.get("pattern"):
+                continue
+            cols = raw.get("csv_columns")
+            rules.append(ContentRule(
+                pattern=str(raw["pattern"]),
+                per_subject=bool(raw.get("per_subject", False)),
+                csv_columns=tuple(cols) if cols else None,
+            ))
+        if spec.get("csv_columns"):
+            rules.append(ContentRule(
+                pattern=None,
+                per_subject=False,
+                csv_columns=tuple(spec["csv_columns"]),
+            ))
+        if rules:
+            result[label] = rules
+    return result
 
 
 def load_tool_spec(tools_path: Path, tool_id: str) -> ToolSpec:
@@ -296,6 +444,8 @@ def load_tool_spec(tools_path: Path, tool_id: str) -> ToolSpec:
     }
 
     return ToolSpec(
+        input_contents=_parse_slot_contents(data.get("inputs")),
+        output_contents=_parse_slot_contents(data.get("outputs")),
         tool_id=tool_id,
         name=data["name"],
         image=data["container"]["image"],
@@ -304,6 +454,7 @@ def load_tool_spec(tools_path: Path, tool_id: str) -> ToolSpec:
         parameters=data.get("parameters") or {},
         resources=data.get("resources") or {},
         time_per_subject_seconds=data.get("time_per_subject_seconds"),
+        fixed_seconds=data.get("fixed_seconds"),
         singularity_run_mode=data.get("container", {}).get("singularity_run_mode"),
         parallelizable=bool(data.get("parallelizable", False)),
         subjects_per_chunk=data.get("subjects_per_chunk"),
@@ -447,7 +598,8 @@ def load_var_group_catalog(resources_path: Path, pipelines_path: Path) -> VarGro
     groups: dict[str, VarGroup] = {}
     for key, g in (groups_raw or {}).items():
         has_values = bool(g.get("values"))
-        has_prefix = bool(g.get("prefix"))
+        # An empty prefix is valid: the columns are the ROI values themselves (e.g. SynthSeg).
+        has_prefix = g.get("prefix") is not None
         if has_values == has_prefix:
             continue
         groups[key] = VarGroup(
@@ -459,6 +611,7 @@ def load_var_group_catalog(resources_path: Path, pipelines_path: Path) -> VarGro
             vtype=g.get("vtype"),
             values=g.get("values"),
             prefix=g.get("prefix"),
+            atlas=g.get("atlas"),
         )
 
     roi_lists: dict[str, RoiList] = {}
@@ -497,6 +650,7 @@ def list_pipelines(pipelines_path: Path) -> list[PipelineSummary]:
                 root_pipeline=data.get("root_pipeline"),
                 harmonized=bool(data.get("harmonized", False)),
                 modalities=data.get("modalities") or [],
+                input_notes=_parse_input_notes(data.get("input_notes")),
             ))
         except Exception:
             continue

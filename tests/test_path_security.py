@@ -131,3 +131,116 @@ def test_safe_unzip_no_partial_extraction(tmp_path):
         safe_unzip(archive, dest)
     # Nothing should have been extracted
     assert not list(dest.iterdir())
+
+
+# ── Upload member classification ──────────────────────────────────────────────
+
+def test_is_skipped_member_matches_dotfiles_and_macos_metadata():
+    from app.services.path_security import is_skipped_member
+
+    assert is_skipped_member(".DS_Store")
+    assert is_skipped_member("__MACOSX/._data.nii.gz")
+    assert is_skipped_member("sub/.hidden/file.csv")
+    assert is_skipped_member("._resource")
+
+
+def test_is_skipped_member_does_not_swallow_path_navigation():
+    """'..' begins with a dot but is a traversal attempt, not a dotfile.
+
+    Classifying it as skippable would drop it quietly instead of failing the
+    request, which is how a traversal could pass unnoticed.
+    """
+    from app.services.path_security import is_skipped_member
+
+    assert not is_skipped_member("../escaped.csv")
+    assert not is_skipped_member("a/../../etc/passwd")
+    assert not is_skipped_member("./a.csv")
+    assert not is_skipped_member("normal.csv")
+
+
+def test_assert_no_symlinks_detects_a_link_written_into_staging(tmp_path):
+    from app.services.path_security import PathEscapeError, assert_no_symlinks
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "real.csv").write_text("MRID\n")
+    assert_no_symlinks(staging)  # clean
+
+    (staging / "link.csv").symlink_to("/etc/passwd")
+    with pytest.raises(PathEscapeError):
+        assert_no_symlinks(staging)
+
+
+def test_assert_no_symlinks_detects_a_linked_directory(tmp_path):
+    """A linked directory would carry its whole subtree outside the root."""
+    from app.services.path_security import PathEscapeError, assert_no_symlinks
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "sub").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(PathEscapeError):
+        assert_no_symlinks(staging)
+
+
+# ── Filtering unzip ───────────────────────────────────────────────────────────
+
+def _zip(tmp_path, entries, name="a.zip"):
+    import zipfile
+
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w") as zf:
+        for member, data in entries.items():
+            zf.writestr(member, data)
+    return path
+
+
+def test_safe_unzip_filtered_skips_dotfiles_and_extracts_the_rest(tmp_path):
+    from app.services.path_security import safe_unzip_filtered
+
+    archive = _zip(tmp_path, {
+        "data.csv": "MRID\n",
+        ".DS_Store": "junk",
+        "__MACOSX/._data.csv": "junk",
+    })
+    dest = tmp_path / "out"
+    dest.mkdir()
+    extracted, skipped = safe_unzip_filtered(archive, dest)
+
+    assert extracted == ["data.csv"]
+    assert sorted(skipped) == sorted([".DS_Store", "__MACOSX/._data.csv"])
+    assert (dest / "data.csv").exists()
+    assert not (dest / ".DS_Store").exists()
+    assert not (dest / "__MACOSX").exists()
+
+
+def test_safe_unzip_filtered_rejects_traversal_before_writing_anything(tmp_path):
+    from app.services.path_security import PathEscapeError, safe_unzip_filtered
+
+    archive = _zip(tmp_path, {"good.csv": "MRID\n", "../escaped.csv": "x"})
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(PathEscapeError):
+        safe_unzip_filtered(archive, dest)
+    assert list(dest.iterdir()) == []
+
+
+def test_safe_unzip_filtered_rejects_symlink_members(tmp_path):
+    import zipfile
+
+    from app.services.path_security import PathEscapeError, safe_unzip_filtered
+
+    archive = tmp_path / "link.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        info = zipfile.ZipInfo("link")
+        info.external_attr = 0o120777 << 16
+        zf.writestr(info, "/etc/passwd")
+        zf.writestr("good.csv", "MRID\n")
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(PathEscapeError):
+        safe_unzip_filtered(archive, dest)
+    assert list(dest.iterdir()) == []

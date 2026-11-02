@@ -1,0 +1,26 @@
+# Dev overlay: cloud-local API reachable from a Vite frontend on localhost:5173.
+#
+# Layers on top of docker-compose.cloud-local.yml. Sets the three things a
+# localhost:5173 browser frontend needs that the cloud-local overlay doesn't:
+#   - post-login redirect target (frontend_url) → the Vite dev server
+#   - CORS origin → the Vite dev server (allow_credentials is already on)
+#   - cookie Secure=false, since the dev API is plain http://localhost
+#
+# Usage:
+#   docker compose -f docker-compose.yml \
+#     -f docker-compose.cloud-local.yml \
+#     -f docker-compose.dev-localhost.yml \
+#     --env-file .env.cloud-local up
+#
+# Prereqs for the browser login flow to succeed (see notes from the maintainer):
+#   - Cognito app client must list  http://localhost:8000/auth/callback  as an
+#     Allowed callback URL, and  http://localhost:5173  as an Allowed sign-out URL.
+#   - NICHART_COGNITO_DOMAIN / _CLIENT_ID / _CLIENT_SECRET must be set.
+#   - Fresh AWS creds (scripts/export-cloud-creds.sh) for Batch/Lambda calls;
+#     auth + browsing work without them.
+services:
+  api:
+    environment:
+      NICHART_FRONTEND_URL: "http://localhost:5173"
+      NICHART_CORS_ORIGINS: '["http://localhost:5173"]'
+      NICHART_COOKIE_SECURE: "false"

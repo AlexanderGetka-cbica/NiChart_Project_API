@@ -53,13 +53,20 @@ from fastapi import HTTPException
 
 from app.backends.base import JobBackend, JobHandle
 from app.models.jobs import (
+    RunPlanStep,
     ChunkStatus,
+    ManualUploadRecord,
     PipelineRunDetail,
     PipelineRunLogs,
     PipelineRunSummary,
     StepStatus,
 )
-from app.services import catalog_service, s3_sync_service
+from app.services import (
+    catalog_service,
+    manual_upload_store,
+    s3_sync_service,
+    usage_service,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -91,6 +98,7 @@ class _StepRecord:
     error: str | None = None
     logs: str = ""
     cached_from_run_id: str | None = None
+    skip_reason: str | None = None   # "cached" | "forced"; set only when skipped
     chunks: list[_ChunkRecord] = field(default_factory=list)
 
 
@@ -109,6 +117,11 @@ class _RunRecord:
     error: str | None = None
     cancelled: bool = False
     backend_type: str = ""  # e.g. "docker", "singularity", "slurm", "batch"
+    start_from_step: str | None = None   # caller-requested start step, if any
+    # Manual intermediate uploads present when the run was submitted. Captured
+    # at submit rather than read live, so the record still describes what this
+    # run actually used after later uploads change the project.
+    manual_uploads: list[dict] = field(default_factory=list)
 
 
 # Set once at startup by load_runs_from_disk(); used by all persistence helpers.
@@ -156,6 +169,33 @@ def _resolve_path(
     return result
 
 
+# ── Atomic file writes ─────────────────────────────────────────────────────────
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via a uniquely-named temp file + rename.
+
+    A bare ``write_text()`` truncates the target before writing, leaving a window
+    in which a concurrent reader sees zero or partial bytes. That matters for
+    every file inside a synced project directory: the S3 uploader streams the
+    file off disk after declaring its Content-Length, so a truncation mid-upload
+    aborts the transfer (the connection closes before a response) and a growth
+    mid-upload silently stores a torn object.
+
+    ``os.replace()`` is atomic on POSIX, so a reader sees either the whole old
+    file or the whole new one, and a reader holding an already-open descriptor
+    keeps reading the intact previous inode. The temp name carries a random
+    suffix so two concurrent writers cannot clobber each other's staging file;
+    ``.tmp`` files are excluded from S3 sync (see ``s3_sync_service``).
+    """
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(text)
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 # ── Step caching ───────────────────────────────────────────────────────────────
 
 _METADATA_FILE = "_working/metadata.json"
@@ -169,7 +209,7 @@ def _load_metadata(study_dir: Path) -> dict:
 def _save_metadata(study_dir: Path, metadata: dict) -> None:
     p = study_dir / _METADATA_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(metadata, indent=2, default=str))
+    _atomic_write_text(p, json.dumps(metadata, indent=2, default=str))
 
 
 def _cache_key(tool_id: str, inputs: dict, params: dict) -> str:
@@ -181,8 +221,23 @@ def _cache_key(tool_id: str, inputs: dict, params: dict) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def _is_cached(metadata: dict, key: str, inputs: dict, outputs: dict) -> str | None:
-    """Return the originating run_id if the step is validly cached, else None."""
+def _is_cached(
+    metadata: dict,
+    key: str,
+    inputs: dict,
+    outputs: dict,
+    manual_overrides: list[tuple[Path, float]] | None = None,
+) -> str | None:
+    """Return the originating run_id if the step is validly cached, else None.
+
+    ``manual_overrides`` is ``(path, uploaded_at)`` for every manual
+    intermediate upload recorded in the project. A step whose output has been
+    replaced by hand is not validly cached however good its entry looks: the
+    files on disk are no longer the ones it produced. This is checked against
+    the step's *outputs*, not its inputs, and so it catches entries written
+    before cache records carried output paths — which is why it, rather than
+    entry deletion alone, is what makes the override guarantee hold.
+    """
     entry = metadata.get(key)
     if not entry or entry.get("status") != "success":
         return None
@@ -195,7 +250,53 @@ def _is_cached(metadata: dict, key: str, inputs: dict, outputs: dict) -> str | N
     for path_str in outputs.values():
         if not Path(path_str).exists():
             return None
+    if _manually_overridden(outputs, finished, manual_overrides):
+        return None
     return entry.get("run_id")
+
+
+def _manually_overridden(
+    outputs: dict,
+    finished: float,
+    manual_overrides: list[tuple[Path, float]] | None,
+) -> bool:
+    """True when a manual upload replaced one of *outputs* after *finished*."""
+    if not manual_overrides:
+        return False
+    out_paths = [Path(p) for p in outputs.values()]
+    return any(
+        uploaded_at > finished and any(_paths_overlap(out, up) for out in out_paths)
+        for up, uploaded_at in manual_overrides
+    )
+
+
+def clear_cache_entries_producing(study_dir: Path, slot_path: Path) -> list[str]:
+    """Drop cache entries whose recorded outputs overlap *slot_path*.
+
+    Called when a slot is populated by hand, so a later full run re-runs the
+    step that normally produces it instead of accepting the uploaded files as
+    its own output. Returns the keys removed.
+
+    Entries written before cache records carried output paths have nothing to
+    match on and are left alone; they are still prevented from being reused, by
+    the manual-upload check in ``_is_cached``. Clearing is the tidier half of
+    that guarantee, not the whole of it.
+    """
+    metadata = _load_metadata(study_dir)
+    removed = [
+        key
+        for key, entry in metadata.items()
+        if isinstance(entry, dict)
+        and any(
+            _paths_overlap(Path(out), slot_path)
+            for out in (entry.get("outputs") or {}).values()
+        )
+    ]
+    if removed:
+        for key in removed:
+            metadata.pop(key, None)
+        _save_metadata(study_dir, metadata)
+    return removed
 
 
 def _verify_outputs_present(resolved_outputs: dict[str, str]) -> str | None:
@@ -218,8 +319,13 @@ def _verify_outputs_present(resolved_outputs: dict[str, str]) -> str | None:
         else:  # directory output
             # Ignore _provenance.json: the API writes it into every output dir,
             # and a stale one pulled back from S3 must not mask an empty result.
+            # Ignore *.tmp for the same reason: an atomic-write staging file
+            # orphaned by a hard kill would otherwise count as a real result.
             real = (
-                [e for e in p.iterdir() if e.name != "_provenance.json"]
+                [
+                    e for e in p.iterdir()
+                    if e.name != "_provenance.json" and e.suffix != ".tmp"
+                ]
                 if p.is_dir() else []
             )
             if not real:
@@ -227,8 +333,62 @@ def _verify_outputs_present(resolved_outputs: dict[str, str]) -> str | None:
     return None
 
 
-def _mark_cached(metadata: dict, key: str, run_id: str) -> None:
-    metadata[key] = {"status": "success", "finished_time": time.time(), "run_id": run_id}
+def _explain_cache_miss(
+    metadata: dict,
+    key: str,
+    inputs: dict,
+    outputs: dict,
+    manual_overrides: list[tuple[Path, float]] | None = None,
+) -> str:
+    """Short human-readable reason _is_cached() returned None.
+
+    Deliberately separate from _is_cached so that function stays the single
+    source of truth for the verdict; this only re-derives the explanation. The
+    checks mirror it in the same order, so a change there needs a change here.
+    """
+    entry = metadata.get(key)
+    if not entry or entry.get("status") != "success":
+        return "no previous successful run"
+    finished = entry.get("finished_time", 0)
+    for path_str in inputs.values():
+        path = Path(path_str)
+        if not path.exists():
+            return "inputs missing"
+        if path.stat().st_mtime > finished:
+            return "inputs changed since last run"
+    for path_str in outputs.values():
+        if not Path(path_str).exists():
+            return "outputs missing"
+    if _manually_overridden(outputs, finished, manual_overrides):
+        return "outputs replaced by a manual upload"
+    return "cache entry no longer valid"
+
+
+def _mark_cached(
+    metadata: dict,
+    key: str,
+    run_id: str,
+    tool_id: str | None = None,
+    inputs: dict | None = None,
+    outputs: dict | None = None,
+) -> None:
+    """Record a successful step under its cache key.
+
+    The key is an opaque MD5 of tool/inputs/params, so the identifying fields
+    are stored alongside it: without them nothing can answer "which entry
+    produced dlmuse_vol/", which is what clearing an overridden step's entry
+    needs. Entries written before this existed simply lack the fields and are
+    skipped by that lookup — they are still invalidated, via the manual-upload
+    check in ``_is_cached``.
+    """
+    metadata[key] = {
+        "status": "success",
+        "finished_time": time.time(),
+        "run_id": run_id,
+        "tool_id": tool_id,
+        "inputs": dict(inputs) if inputs else {},
+        "outputs": dict(outputs) if outputs else {},
+    }
 
 
 # ── Parallel chunk helpers ────────────────────────────────────────────────────
@@ -251,6 +411,27 @@ def _collect_subjects_from_path(path_str: str) -> list[str]:
         elif f.suffix == ".nii":
             mrids.append(f.name[:-4])
     return sorted(mrids)
+
+
+def _count_subjects_at(path: Path) -> int:
+    """Subjects at one resolved input path: NIfTI files in a dir, else the file itself."""
+    if path.is_dir():
+        return sum(1 for f in path.iterdir() if f.suffix in (".gz", ".nii"))
+    return 1 if path.exists() else 0
+
+
+def _step_subject_count(resolved_inputs: dict[str, str]) -> int:
+    """Subjects a step will process: the largest per-input count, floored at 1.
+
+    Shared with the dry-run planner so an estimate is based on the same number
+    the real run would use.
+    """
+    if not resolved_inputs:
+        return 1
+    return max(
+        1,
+        max((_count_subjects_at(Path(v)) for v in resolved_inputs.values()), default=0),
+    )
 
 
 def _compute_chunk_count(tool_spec, n_subjects: int) -> int:
@@ -480,7 +661,9 @@ def _write_provenance(
     for d in dirs:
         try:
             d.mkdir(parents=True, exist_ok=True)
-            (d / "_provenance.json").write_text(json.dumps(payload, indent=2, default=str))
+            _atomic_write_text(
+                d / "_provenance.json", json.dumps(payload, indent=2, default=str)
+            )
         except Exception as exc:
             _log.warning("Could not write provenance to %s: %s", d, exc)
 
@@ -501,6 +684,8 @@ def _run_to_dict(run: _RunRecord) -> dict:
         "error": run.error,
         "cancelled": run.cancelled,
         "backend_type": run.backend_type,
+        "start_from_step": run.start_from_step,
+        "manual_uploads": run.manual_uploads,
         "steps": [
             {
                 "step_id": s.step_id,
@@ -514,6 +699,7 @@ def _run_to_dict(run: _RunRecord) -> dict:
                 "error": s.error,
                 "logs": s.logs,
                 "cached_from_run_id": s.cached_from_run_id,
+                "skip_reason": s.skip_reason,
                 "chunks": [
                     {
                         "chunk_idx": c.chunk_idx,
@@ -550,6 +736,8 @@ def _run_from_dict(d: dict) -> _RunRecord:
         error=d.get("error"),
         cancelled=d.get("cancelled", False),
         backend_type=d.get("backend_type", ""),
+        start_from_step=d.get("start_from_step"),
+        manual_uploads=d.get("manual_uploads") or [],
     )
     run.steps = [
         _StepRecord(
@@ -564,6 +752,7 @@ def _run_from_dict(d: dict) -> _RunRecord:
             error=s.get("error"),
             logs=s.get("logs", ""),
             cached_from_run_id=s.get("cached_from_run_id"),
+            skip_reason=s.get("skip_reason"),
             chunks=[
                 _ChunkRecord(
                     chunk_idx=c["chunk_idx"],
@@ -817,8 +1006,85 @@ async def run_pipeline_task(
     tools_path: Path,
     s3_sync: S3SyncConfig | None = None,
     execution_mode: str = "",
+    start_from_step: str | None = None,
+) -> None:
+    """Run the pipeline, then record terminal usage counters.
+
+    A thin wrapper so every terminal counter is emitted from exactly one place.
+    The orchestrator returns early from a dozen different failure points, and
+    hooking each of them individually would guarantee missing one; reading the
+    final state off the run record afterwards cannot miss any. Counting is
+    best-effort and never raises, so the ``finally`` cannot mask a real error.
+    """
+    try:
+        await _run_pipeline_steps(
+            run=run,
+            pipeline_steps=pipeline_steps,
+            study_dir=study_dir,
+            backend=backend,
+            user_params=user_params,
+            reuse_cached_steps=reuse_cached_steps,
+            user_token=user_token,
+            tools_path=tools_path,
+            s3_sync=s3_sync,
+            execution_mode=execution_mode,
+            start_from_step=start_from_step,
+        )
+    finally:
+        _record_usage_for_finished_run(run, execution_mode)
+
+
+def _record_usage_for_finished_run(run: _RunRecord, execution_mode: str) -> None:
+    """Emit per-tool and whole-pipeline counters from a finished run record."""
+    usage_service.record_pipeline_outcome(
+        run.pipeline_id,
+        execution_mode,
+        succeeded=run.status == "succeeded",
+        chunks=sum(len(s.chunks) for s in run.steps),
+    )
+    for step in run.steps:
+        if step.status == "skipped":
+            # Served from the step cache (or coalesced onto a sibling run), so
+            # the tool itself never executed.
+            usage_service.record_cache_hit(step.tool_id, execution_mode)
+        elif step.status in ("succeeded", "failed", "partially_failed"):
+            usage_service.record_tool_outcome(
+                step.tool_id,
+                execution_mode,
+                succeeded=step.status == "succeeded",
+                chunks=len(step.chunks),
+            )
+
+
+async def _run_pipeline_steps(
+    run: _RunRecord,
+    pipeline_steps: list,          # list of PipelineStep (from catalog model)
+    study_dir: Path,
+    backend: JobBackend,
+    user_params: dict[str, Any],
+    reuse_cached_steps: bool,
+    user_token: str | None,
+    tools_path: Path,
+    s3_sync: S3SyncConfig | None = None,
+    execution_mode: str = "",
+    start_from_step: str | None = None,
 ) -> None:
     """Background task: drive each pipeline step in order, with caching and error handling."""
+    # Index of the caller's requested start step, if any. Everything before it is
+    # skipped unchecked; the step itself always runs.
+    start_index = None
+    if start_from_step is not None:
+        start_index = next(
+            (i for i, sd in enumerate(pipeline_steps) if sd.id == start_from_step), None
+        )
+        if start_index is None:
+            # Validated at submit time; treat a stale id as a hard failure rather
+            # than silently running the whole pipeline.
+            run.status = "failed"
+            run.error = f"Unknown start_from_step '{start_from_step}'"
+            run.finished_at = datetime.now(timezone.utc)
+            _save_run(run)
+            return
     run.backend_type = backend.backend_name
 
     # Wait until no other pipeline is running for this user (user-level serialisation).
@@ -840,7 +1106,9 @@ async def run_pipeline_task(
     # Compute the project-scoped S3 prefix once, used for all steps.
     _s3_project_prefix: str | None = None
     if s3_sync:
-        _s3_project_prefix = f"{s3_sync.prefix}/{run.user_id}/{study_dir.name}"
+        _s3_project_prefix = s3_sync_service.project_prefix(
+            s3_sync.prefix, run.user_id, study_dir.name
+        )
 
     if _s3_project_prefix:
         try:
@@ -854,6 +1122,7 @@ async def run_pipeline_task(
             return
 
     metadata = _load_metadata(study_dir)
+    manual_overrides = manual_upload_store.override_paths(study_dir)
     step_outputs: dict[str, dict[str, str]] = {}
 
     for i, step_def in enumerate(pipeline_steps):
@@ -891,13 +1160,36 @@ async def run_pipeline_task(
             _save_run(run)
             return
 
+        # Forced skip: steps before the caller's start step are marked skipped
+        # with no cache, output or input checks at all, and their declared outputs
+        # are assumed to already exist at the resolved paths. step_outputs is still
+        # populated so later ${step.outputs.*} templates resolve.
+        if start_index is not None and i < start_index:
+            step.status = "skipped"
+            step.skip_reason = "forced"
+            step.cached_from_run_id = None
+            step.finished_at = datetime.now(timezone.utc)
+            step_outputs[step_def.id] = resolved_outputs
+            _save_run(run)
+            continue
+
+        # The start step always runs: the caller has typically hand-placed or
+        # edited its inputs, so neither a cache hit nor an identical step already
+        # in flight elsewhere may stand in for it (that sibling's inputs predate
+        # the edit). This can mean two identical jobs run concurrently, which is
+        # the intended trade for an explicit forced start.
+        force_run = start_index is not None and i == start_index
+
         key = _cache_key(step_def.tool, resolved_inputs, merged_params)
 
         # Check step cache (only for freshly-pending steps, not in-progress reconnects).
-        if step.status == "pending" and reuse_cached_steps:
-            cached_run_id = _is_cached(metadata, key, resolved_inputs, resolved_outputs)
+        if step.status == "pending" and reuse_cached_steps and not force_run:
+            cached_run_id = _is_cached(
+                metadata, key, resolved_inputs, resolved_outputs, manual_overrides
+            )
             if cached_run_id is not None:
                 step.status = "skipped"
+                step.skip_reason = "cached"
                 step.finished_at = datetime.now(timezone.utc)
                 step.cached_from_run_id = cached_run_id
                 step_outputs[step_def.id] = resolved_outputs
@@ -906,7 +1198,7 @@ async def run_pipeline_task(
 
         # If another run is currently executing this exact step (same cache key),
         # wait for it rather than submitting a duplicate job.
-        if step.status == "pending":
+        if step.status == "pending" and not force_run:
             _wait = await _wait_for_in_flight_step(key, run.run_id)
             if _wait is True:
                 # Sibling succeeded — its outputs are on disk. Reload metadata
@@ -915,6 +1207,7 @@ async def run_pipeline_task(
                 entry = metadata.get(key)
                 step.cached_from_run_id = entry.get("run_id") if entry else None
                 step.status = "skipped"
+                step.skip_reason = "cached"
                 step.finished_at = datetime.now(timezone.utc)
                 step_outputs[step_def.id] = resolved_outputs
                 _save_run(run)
@@ -980,19 +1273,16 @@ async def run_pipeline_task(
                 return
 
             # Estimate subject count for cloud queue-drain metric and SLURM time limits.
-            def _count_subjects(p: Path) -> int:
-                if p.is_dir():
-                    return sum(1 for f in p.iterdir() if f.suffix in (".gz", ".nii"))
-                return 1 if p.exists() else 0
-
-            num_subjects = max(
-                1,
-                max((_count_subjects(Path(v)) for v in resolved_inputs.values()), default=0),
-            ) if resolved_inputs else 1
+            num_subjects = _step_subject_count(resolved_inputs)
 
             step.status = "running"
             step.submitted_at = datetime.now(timezone.utc)
             step.container_image = tool_spec.image
+            # Counted here, once per step, rather than per chunk: a ten-chunk
+            # step is one use of the tool. Chunk volume rides on the outcome.
+            usage_service.record_tool_run(
+                step_def.tool, execution_mode, subjects=num_subjects
+            )
 
             # Upload project data to S3 before submitting so the Batch job can pull
             # the latest inputs. A sync failure aborts the step.
@@ -1258,7 +1548,12 @@ async def run_pipeline_task(
                         user_id=run.user_id,
                         backend=run.backend_type,
                     )
-                _mark_cached(metadata, key, run.run_id)
+                _mark_cached(
+                    metadata, key, run.run_id,
+                    tool_id=step_def.tool,
+                    inputs=resolved_inputs,
+                    outputs=resolved_outputs,
+                )
                 _save_metadata(study_dir, metadata)
                 if flight:
                     flight.resolve(True)
@@ -1360,7 +1655,12 @@ async def run_pipeline_task(
                 user_id=run.user_id,
                 backend=run.backend_type,
             )
-        _mark_cached(metadata, key, run.run_id)
+        _mark_cached(
+            metadata, key, run.run_id,
+            tool_id=step_def.tool,
+            inputs=resolved_inputs,
+            outputs=resolved_outputs,
+        )
         _save_metadata(study_dir, metadata)
         if flight:
             flight.resolve(True)
@@ -1389,6 +1689,35 @@ async def run_direct_steps_task(
     user_token: str | None,
     tools_path: Path,
     study_dir: Path | None = None,
+    execution_mode: str = "",
+) -> None:
+    """Run the steps, then record terminal usage counters.
+
+    Mirrors run_pipeline_task: the counters are derived from the finished run
+    record so no early return can skip them.
+    """
+    try:
+        await _run_direct_steps(
+            run=run,
+            direct_steps=direct_steps,
+            backend=backend,
+            user_token=user_token,
+            tools_path=tools_path,
+            study_dir=study_dir,
+            execution_mode=execution_mode,
+        )
+    finally:
+        _record_usage_for_finished_run(run, execution_mode)
+
+
+async def _run_direct_steps(
+    run: _RunRecord,
+    direct_steps: list[DirectStep],
+    backend: JobBackend,
+    user_token: str | None,
+    tools_path: Path,
+    study_dir: Path | None = None,
+    execution_mode: str = "",
 ) -> None:
     """Background task: execute a list of pre-resolved steps sequentially."""
     run.status = "running"
@@ -1407,6 +1736,7 @@ async def run_direct_steps_task(
         step = run.steps[i]
         step.status = "running"
         step.submitted_at = datetime.now(timezone.utc)
+        usage_service.record_tool_run(step_def.tool_id, execution_mode, subjects=1)
 
         try:
             tool_spec = catalog_service.load_tool_spec(tools_path, step_def.tool_id)
@@ -1507,13 +1837,33 @@ def get_and_advance_poll_cursor(
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+def validate_start_from_step(pipeline_steps: list, start_from_step: str | None) -> None:
+    """Reject a start_from_step that is not one of the pipeline's steps (HTTP 400)."""
+    if start_from_step is None:
+        return
+    known = [sd.id for sd in pipeline_steps]
+    if start_from_step not in known:
+        raise HTTPException(
+            400,
+            f"Unknown start_from_step '{start_from_step}'. "
+            f"This pipeline's steps are: {known}",
+        )
+
+
 def create_pipeline_run(
     user_id: str,
     project_id: str,
     pipeline_id: str,
     pipeline_steps: list,
+    start_from_step: str | None = None,
+    study_dir: Path | None = None,
 ) -> _RunRecord:
-    """Create and register a pipeline run record (does not start the task)."""
+    """Create and register a pipeline run record (does not start the task).
+
+    Any manual intermediate uploads present in the project are copied onto the
+    record now, so the run keeps saying which of its inputs were supplied by
+    hand even after later uploads change the project.
+    """
     run_id = str(uuid.uuid4())
     run = _RunRecord(
         run_id=run_id,
@@ -1522,6 +1872,11 @@ def create_pipeline_run(
         pipeline_id=pipeline_id,
         total_steps=len(pipeline_steps),
         steps=[_StepRecord(step_id=s.id, tool_id=s.tool) for s in pipeline_steps],
+        start_from_step=start_from_step,
+        manual_uploads=(
+            manual_upload_store.records_for_response(study_dir)
+            if study_dir is not None else []
+        ),
     )
     _save_run(run)
     return run
@@ -1571,6 +1926,8 @@ def _to_detail(run: _RunRecord) -> PipelineRunDetail:
         current_step=run.current_step,
         total_steps=run.total_steps,
         error=run.error,
+        start_from_step=run.start_from_step,
+        manual_uploads=[ManualUploadRecord(**r) for r in run.manual_uploads],
         steps=[
             _step_record_to_status(s)
             for s in run.steps
@@ -1659,6 +2016,7 @@ def _step_record_to_status(s: _StepRecord) -> StepStatus:
         container_image=s.container_image,
         error=s.error,
         cached_from_run_id=s.cached_from_run_id,
+        skip_reason=s.skip_reason,
         total_chunks=total_chunks,
         completed_chunks=completed_chunks,
         failed_chunks=failed_chunks,
@@ -1767,3 +2125,235 @@ def cancel_run(run_id: str, user_id: str) -> None:
         raise HTTPException(403, "Access denied")
     run.cancelled = True
     _save_run(run)
+
+
+# ── Dry-run planning ──────────────────────────────────────────────────────────
+
+def _paths_overlap(a: Path, b: Path) -> bool:
+    """True when two resolved paths refer to the same data.
+
+    Either path may be a directory containing the other: a step whose output is
+    ``dlmuse_vol/`` feeds a later step whose input is
+    ``dlmuse_vol/DLMUSE_Volumes.csv``, and the reverse nesting happens too.
+    """
+    return a == b or a in b.parents or b in a.parents
+
+
+def _planned_subject_count(
+    resolved_inputs: dict[str, str],
+    predicted_outputs: list[tuple[Path, int]],
+) -> int:
+    """Subjects a step will process by the time the run actually reaches it.
+
+    Differs from ``_step_subject_count`` (which the real run uses) only in
+    looking ahead. On disk today, a step reading a directory an earlier step has
+    yet to fill counts zero and floors to 1 — understating it by the whole
+    cohort and making the total estimate far too low, the opposite of the
+    overestimate this endpoint exists to fix. So an input directory that overlaps
+    the outputs of an earlier step predicted to run is credited with that step's
+    subject count.
+
+    Only directory inputs are inflated. The real run counts any *file* input as
+    exactly one subject whatever its contents, so crediting a CSV with its
+    producer's count would make ``subjects`` disagree with what the run will
+    compute — and with how it chunks. Directory-vs-file is decided by the path
+    suffix, the same convention the run loop uses when creating output paths.
+    """
+    if not resolved_inputs:
+        return 1
+
+    largest = 0
+    for path_str in resolved_inputs.values():
+        path = Path(path_str)
+        count = _count_subjects_at(path)
+        if not path.suffix:
+            for out_path, out_count in predicted_outputs:
+                if _paths_overlap(path, out_path):
+                    count = max(count, out_count)
+        largest = max(largest, count)
+    return max(1, largest)
+
+
+def plan_pipeline_run(
+    study_dir: Path,
+    pipeline_steps: list,
+    user_params: dict[str, Any],
+    reuse_cached_steps: bool,
+    tools_path: Path,
+    start_from_step: str | None = None,
+) -> tuple[list[RunPlanStep], float | None, float | None]:
+    """Predict how a submission would execute, without submitting anything.
+
+    Returns ``(steps, estimated_total_seconds, estimated_full_seconds)``.
+
+    Resolution, cache keys and the cache verdict come from the same helpers the
+    real loop uses (``_resolve_path``, ``_cache_key``, ``_is_cached``,
+    ``_load_metadata``), so a prediction only diverges where it necessarily must:
+
+    * **Downstream propagation is modelled, not observed.** A real run re-writes a
+      step's outputs, which bumps their mtimes and makes downstream steps miss the
+      cache. Nothing has run yet here, so instead any step that reads a path
+      overlapping the outputs of an earlier step predicted to run is itself
+      predicted to run. A real run could still reuse such a step if the tool
+      rewrote its outputs with an older mtime, which no current tool does.
+    * **In-flight siblings are not predicted as reuses.** ``_wait_for_in_flight_step``
+      can turn a step into a hit when an identical step is already running
+      elsewhere; that sibling may also fail, so the step is reported as "run" with
+      ``in_flight_elsewhere`` set.
+    * **Nothing is written.** No run record, no cache metadata, no output dirs.
+    """
+    metadata = _load_metadata(study_dir)
+    manual_overrides = manual_upload_store.override_paths(study_dir)
+    step_outputs: dict[str, dict[str, str]] = {}
+
+    start_index = None
+    if start_from_step is not None:
+        start_index = next(
+            (i for i, sd in enumerate(pipeline_steps) if sd.id == start_from_step), None
+        )
+
+    # Resolved outputs of steps predicted to run, with the subject count each is
+    # predicted to produce. Drives both the downstream re-run rule and the
+    # look-ahead subject count. Steps predicted to 'reuse' or 'skip_forced' are
+    # deliberately absent: their outputs are already on disk at the right size.
+    rerun_outputs: list[tuple[Path, int]] = []
+    plan: list[RunPlanStep] = []
+    # Cost each step would incur IF it ran, aligned with `plan`. Kept separate
+    # from RunPlanStep.estimated_seconds (which is 0 for a step that won't run)
+    # so estimated_full_seconds can still answer "what if nothing were reused".
+    would_run_costs: list[float | None] = []
+
+    for index, step_def in enumerate(pipeline_steps):
+        resolved_inputs = {
+            label: _resolve_path(val, study_dir, step_outputs)
+            for label, val in (step_def.inputs or {}).items()
+        }
+        resolved_outputs = {
+            label: _resolve_path(val, study_dir, step_outputs)
+            for label, val in (step_def.outputs or {}).items()
+        }
+        step_outputs[step_def.id] = resolved_outputs
+        merged_params = {**user_params, **(step_def.params or {})}
+
+        try:
+            tool_spec = catalog_service.load_tool_spec(tools_path, step_def.tool)
+            time_per_subject = tool_spec.time_per_subject_seconds
+            fixed_seconds = tool_spec.fixed_seconds
+            parallelizable = bool(tool_spec.parallelizable)
+            subjects_per_chunk = tool_spec.subjects_per_chunk
+        except Exception:
+            time_per_subject = fixed_seconds = subjects_per_chunk = None
+            parallelizable = False
+
+        subjects = _planned_subject_count(resolved_inputs, rerun_outputs)
+        key = _cache_key(step_def.tool, resolved_inputs, merged_params)
+        in_flight = key in _step_in_flight
+
+        action = "run"
+        reason: str | None = None
+        cached_from: str | None = None
+        missing_inputs: list[str] = []
+
+        if start_index is not None and index < start_index:
+            # Assumed already done by the user; contributes nothing and does not
+            # force downstream steps to re-run.
+            action = "skip_forced"
+        elif start_index is not None and index == start_index:
+            reason = "start step always runs"
+            missing_inputs = sorted(
+                _project_relative(Path(path), study_dir)
+                for path in resolved_inputs.values()
+                if not Path(path).exists()
+            )
+            rerun_outputs.extend((Path(p), subjects) for p in resolved_outputs.values())
+        elif not reuse_cached_steps:
+            reason = "cache reuse disabled"
+            rerun_outputs.extend((Path(p), subjects) for p in resolved_outputs.values())
+        else:
+            # The step's own cache verdict is established first, so the reported
+            # reason is the one that actually blocks reuse. "upstream step will
+            # re-run" then overrides only a step that WOULD have been reused —
+            # otherwise a first-ever run would attribute every downstream step to
+            # its upstream instead of saying it has simply never run.
+            upstream_dirty = any(
+                _paths_overlap(Path(inp), out_path)
+                for inp in resolved_inputs.values()
+                for out_path, _count in rerun_outputs
+            )
+            cached_run_id = _is_cached(
+                metadata, key, resolved_inputs, resolved_outputs, manual_overrides
+            )
+            if cached_run_id is not None and not upstream_dirty:
+                action = "reuse"
+                cached_from = cached_run_id
+            else:
+                reason = (
+                    "upstream step will re-run" if cached_run_id is not None
+                    else _explain_cache_miss(
+                        metadata, key, resolved_inputs, resolved_outputs,
+                        manual_overrides,
+                    )
+                )
+                rerun_outputs.extend((Path(p), subjects) for p in resolved_outputs.values())
+
+        if time_per_subject is None and fixed_seconds is None:
+            # Genuinely unknown, as distinct from free.
+            cost = None
+        else:
+            # fixed + per-subject. A tool declaring only fixed_seconds (startup
+            # dominated, e.g. the CSV steps) now contributes a real number instead
+            # of being written off as untimed.
+            cost = (fixed_seconds or 0.0) + (time_per_subject or 0.0) * subjects
+        would_run_costs.append(cost)
+        estimated = cost if action == "run" else 0.0
+
+        plan.append(RunPlanStep(
+            step_id=step_def.id,
+            tool_id=step_def.tool,
+            name=getattr(step_def, "name", None),
+            action=action,
+            will_reuse=action == "reuse",
+            cached_from_run_id=cached_from,
+            reason=reason,
+            subjects=subjects,
+            estimated_seconds=estimated,
+            time_per_subject_seconds=time_per_subject,
+            fixed_seconds=fixed_seconds,
+            parallelizable=parallelizable,
+            subjects_per_chunk=subjects_per_chunk,
+            in_flight_elsewhere=in_flight and action == "run",
+            missing_inputs=missing_inputs,
+            uses_manual_uploads=any(
+                _paths_overlap(Path(inp), up)
+                for inp in resolved_inputs.values()
+                for up, _ts in manual_overrides
+            ),
+        ))
+
+    def _total(costs: list[float | None]) -> float:
+        """Sum of the steps that have timing; untimed steps contribute 0.
+
+        A single untimed tool used to void the whole sum, which left callers with
+        nothing at all — and every tool whose input is a CSV currently declares no
+        timing, so that was the common case rather than the exception. Those steps
+        are also the cheap ones, so a lower bound is much more useful than null.
+        The per-step ``estimated_seconds`` stays null for them, and the caller is
+        told how many were unaccounted for, so the total can be labelled as a
+        minimum rather than mistaken for complete.
+        """
+        return float(sum(c for c in costs if c is not None))
+
+    will_run = [c for p, c in zip(plan, would_run_costs) if p.action == "run"]
+    # "as if nothing were reused": a reused step still contributes its would-run
+    # cost here, which is the whole point of the upper bound.
+    not_skipped = [
+        c for p, c in zip(plan, would_run_costs) if p.action != "skip_forced"
+    ]
+    return plan, _total(will_run), _total(not_skipped)
+
+
+def _project_relative(path: Path, study_dir: Path) -> str:
+    try:
+        return str(path.relative_to(study_dir))
+    except ValueError:
+        return str(path)

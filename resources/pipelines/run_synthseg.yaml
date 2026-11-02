@@ -41,6 +41,12 @@ results:
     # it to MRID, set mrid_column accordingly or the results will be empty.
     mrid_column: "MRID"
     default_unit: "mm³"
+    # CSV columns are the ROI names themselves, so the template uses {name} (the mapping's
+    # second column) rather than {id}. Label ids are SynthSeg/FreeSurfer labels; composite
+    # rows (total intracranial, left/right cerebral cortex) list their constituent labels.
+    label_map: "atlases/synthseg/synthseg_mapping_derived.csv"
+    column_template: "{name}"
+    # feature_groups omitted: label_id_range grouping doesn't fit SynthSeg's id scheme.
     # label_map / column_template / feature_groups intentionally omitted:
     # SynthSeg labels do not correspond to the MUSE parcellation, and there is no
     # ROI integer-to-region-name mapping for them yet. Add label_map +

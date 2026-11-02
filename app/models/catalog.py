@@ -4,7 +4,7 @@ Response schemas for the pipeline/tool catalog endpoints.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModalityInfo(BaseModel):
@@ -26,6 +26,43 @@ class ParameterSpec(BaseModel):
     max: float | None = Field(default=None, description="Maximum value (numeric types only).")
 
 
+class SlotContentRule(BaseModel):
+    """One expected-content rule for a tool's directory slot.
+
+    Declares what a directory normally holds, so that a directory populated by
+    something other than the producing tool — a manual intermediate upload —
+    can be checked against the same expectation. Without such a declaration the
+    naming convention exists only inside the tool's ``command`` string (e.g.
+    ``--dlmuse_suff _DLMUSE.nii.gz``) and nothing can verify it.
+
+    Uses the same ``{MRID}`` placeholder as a pipeline's
+    ``results.per_subject[].pattern``; the two are cross-checked by
+    scripts/check_pipeline_tool_filenames.py so they cannot drift apart.
+    """
+
+    pattern: str = Field(
+        description=(
+            "Expected file name relative to the slot directory. ``{MRID}`` is "
+            "substituted per subject; any other character is matched as a glob, "
+            "so ``*.nii.gz`` is also valid."
+        )
+    )
+    per_subject: bool = Field(
+        default=False,
+        description=(
+            "True when one matching file is expected for every subject in the "
+            "project. False for a single fixed file such as a summary CSV."
+        ),
+    )
+    csv_columns: list[str] | None = Field(
+        default=None,
+        description=(
+            "Column names the file must contain when parsed as CSV. "
+            "Null for non-CSV files."
+        ),
+    )
+
+
 class IOField(BaseModel):
     """An input or output slot on a tool."""
 
@@ -41,6 +78,23 @@ class IOField(BaseModel):
             "'directory_union_csv_concat': same as directory_union, but CSV files with matching "
             "names across chunks are row-concatenated (header kept once). "
             "'csv_concat': concatenate a single CSV file output."
+        ),
+    )
+    contents: list[SlotContentRule] | None = Field(
+        default=None,
+        description=(
+            "Files this directory slot is expected to hold. Declared on "
+            "directory slots only; omit for file slots, which use "
+            "``csv_columns`` instead. Null when the tool declares nothing, "
+            "in which case an upload to this slot is checked only against the "
+            "paths the consuming pipeline steps actually read."
+        ),
+    )
+    csv_columns: list[str] | None = Field(
+        default=None,
+        description=(
+            "For a file slot: column names the file must contain when parsed "
+            "as CSV. Null for non-CSV file slots and for directory slots."
         ),
     )
 
@@ -75,6 +129,15 @@ class ToolDetail(ToolSummary):
             "Used by GET /cloud/status to estimate queue-drain time."
         ),
     )
+    fixed_seconds: float | None = Field(
+        default=None,
+        description=(
+            "One-off wall-clock seconds per invocation regardless of cohort size — "
+            "container start, model loading, interpreter warm-up. A run's estimate is "
+            "fixed_seconds + time_per_subject_seconds x subjects. Tools whose cost is "
+            "almost entirely startup declare only this."
+        ),
+    )
     parallelizable: bool = Field(
         default=False,
         description=(
@@ -100,6 +163,21 @@ class PipelineStep(BaseModel):
     """A single step within a pipeline definition."""
 
     id: str = Field(description="Step identifier, unique within the pipeline.")
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable step name: the step's optional 'name' key in the pipeline "
+            "YAML, falling back to the invoked tool's name. Null when neither exists — "
+            "deliberately NOT the raw id, so a client can choose its own fallback."
+        ),
+    )
+    description: str | None = Field(
+        default=None,
+        description=(
+            "Step description: the step's optional 'description' key in the pipeline "
+            "YAML, falling back to the invoked tool's description. Null when neither exists."
+        ),
+    )
     tool: str = Field(description="Tool ID this step invokes.")
     inputs: dict[str, str] = Field(description="Input slot → path template mapping.")
     outputs: dict[str, str] = Field(description="Output slot → path template mapping.")
@@ -112,6 +190,14 @@ class PipelineSummary(BaseModel):
     id: str = Field(description="Pipeline identifier (YAML basename without extension).")
     name: str = Field(description="Human-readable pipeline name.")
     description: str | None = Field(default=None)
+    input_notes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Short user-facing notes about input requirements that readiness checks "
+            "can't verify (e.g. 'Upload raw, unprocessed T1 images'). Plain text, "
+            "shown verbatim. Empty when the pipeline declares none."
+        ),
+    )
     categories: list[str] = Field(default_factory=list)
     requires: list[str] = Field(
         default_factory=list,
@@ -204,6 +290,74 @@ class ColumnSpec(BaseModel):
     )
 
 
+class SubjectPredicate(BaseModel):
+    """One condition on a participants.csv column, used to define a subject cohort.
+
+    Conditions combine with AND within a single constraint. String comparisons
+    (``equals``, ``in``) are case-insensitive and whitespace-stripped; numeric
+    bounds (``min``, ``max``) are inclusive, matching ColumnSpec.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    column: str = Field(description="participants.csv column this condition applies to.")
+    equals: str | None = Field(
+        default=None,
+        description="Cell must equal this value, compared case-insensitively.",
+    )
+    in_: list[str] | None = Field(
+        default=None,
+        alias="in",
+        description="Cell must be one of these values, compared case-insensitively.",
+    )
+    min: float | None = Field(
+        default=None, description="Inclusive numeric lower bound. Null means unbounded."
+    )
+    max: float | None = Field(
+        default=None, description="Inclusive numeric upper bound. Null means unbounded."
+    )
+
+
+class SubjectConstraintSpec(BaseModel):
+    """A declared minimum number of subjects matching a predicate.
+
+    Only subjects that have imaging *and* a participants.csv row satisfying every
+    condition count towards this minimum.
+    """
+
+    label: str | None = Field(
+        default=None, description="Human-readable cohort name, for display."
+    )
+    where: list[SubjectPredicate] = Field(
+        default_factory=list,
+        description="Conditions defining this cohort, combined with AND.",
+    )
+    required: int = Field(description="Minimum matching subjects needed to run at all.")
+    recommended: int = Field(
+        description="Recommended number of matching subjects for reliable results."
+    )
+
+
+class MinSubjectsSpec(BaseModel):
+    """Declared subject-count requirement, with optional per-cohort minimums.
+
+    Thresholds are returned with pipeline-YAML defaults already resolved, so a
+    client never has to replicate the defaulting rules.
+    """
+
+    required: int = Field(description="Minimum total subjects needed to run at all.")
+    recommended: int = Field(
+        description="Recommended total number of subjects for reliable results."
+    )
+    constraints: list[SubjectConstraintSpec] = Field(
+        default_factory=list,
+        description=(
+            "Per-cohort minimums, e.g. 'at least 30 subjects with DX == CN'. "
+            "Empty when the pipeline declares none."
+        ),
+    )
+
+
 class LabelInfo(BaseModel):
     """Display metadata for a single feature column.
 
@@ -268,14 +422,22 @@ class VarGroup(BaseModel):
     prefix: str | None = Field(
         default=None,
         description=(
-            "Column-name prefix for ROI-indexed variables, e.g. 'DL_MUSE_Volume_'. "
+            "Column-name prefix for ROI-indexed variables, e.g. 'DL_MUSE_Volume_'. May be "
+            "empty ('') when the CSV columns are the ROI names themselves (e.g. SynthSeg). "
             "Mutually exclusive with values."
+        ),
+    )
+    atlas: str | None = Field(
+        default=None,
+        description=(
+            "For prefix-based groups: the atlas whose roi_lists apply to this group "
+            "(matches RoiList.atlas), e.g. 'muse' or 'synthseg'."
         ),
     )
 
 
 class RoiList(BaseModel):
-    """A curated sub-list of ROI indices, used to narrow a prefix-based VarGroup.
+    """A curated sub-list of ROIs, used to narrow a prefix-based VarGroup.
 
     Defined in ``resources/dicts/dict_roi_lists.yaml``.
     """
@@ -283,7 +445,12 @@ class RoiList(BaseModel):
     key: str = Field(description="List identifier (YAML top-level key), e.g. 'list_muse-all'.")
     desc: str | None = Field(default=None, description="Human-readable description of this list.")
     atlas: str = Field(description="Atlas these indices belong to, e.g. 'muse'.")
-    values: list[int] = Field(description="ROI index values in this list.")
+    values: list[int | str] = Field(
+        description=(
+            "ROIs in this list: integer indices (e.g. MUSE) or ROI names when the atlas's "
+            "CSV columns are named by region (e.g. SynthSeg)."
+        ),
+    )
 
 
 class VarGroupCatalogResponse(BaseModel):
@@ -338,6 +505,16 @@ class PipelineDetail(PipelineSummary):
             "Pass values via ``params`` in the pipeline submit body. "
             "Step-level params in the YAML are fixed by the pipeline author and "
             "cannot be overridden."
+        ),
+    )
+    min_subjects: MinSubjectsSpec | None = Field(
+        default=None,
+        description=(
+            "Subject-count requirement declared by this pipeline, including any "
+            "per-cohort constraints. Null when the pipeline declares no "
+            "min_subjects requirement. Lets a client show what a pipeline needs "
+            "before any data is uploaded; GET /projects/{id}/readiness/{pipeline_id} "
+            "reports how a specific project measures up."
         ),
     )
     atlas_resource_path: str | None = Field(

@@ -58,6 +58,43 @@ async def read_heartbeat(bucket: str, prefix: str, user_id: str, project_id: str
     return await asyncio.to_thread(_read_heartbeat_sync, bucket, key)
 
 
+async def touch_project(
+    bucket: str | None,
+    prefix: str,
+    user_id: str,
+    project_id: str,
+    activity: str,
+) -> None:
+    """Reset a project's retention countdown because it is being used.
+
+    The sweep Lambda measures staleness from the heartbeat object alone, not from
+    the project's other objects — so work that rewrites hundreds of files under
+    the prefix does not, by itself, keep a project alive. Running a pipeline is
+    the strongest signal of use there is, and with a 7-day default window a
+    project used every day could otherwise still be deleted.
+
+    No-op when no S3 bucket is configured (local mode). Never raises: failing to
+    refresh must not fail the action that triggered it, and the daily sweep
+    backfills a missing heartbeat.
+    """
+    if not bucket:
+        return
+    try:
+        await write_heartbeat(
+            bucket=bucket, prefix=prefix, user_id=user_id, project_id=project_id
+        )
+        _log.debug(
+            "Refreshed retention heartbeat for project %r (user %r) on %s",
+            project_id, user_id, activity,
+        )
+    except Exception:
+        _log.exception(
+            "Failed to refresh retention heartbeat for project %r (user %r) on %s; "
+            "Lambda will backfill on next sweep.",
+            project_id, user_id, activity,
+        )
+
+
 def expires_at(last_modified: datetime, retention_days: int) -> datetime:
     return last_modified + timedelta(days=retention_days)
 

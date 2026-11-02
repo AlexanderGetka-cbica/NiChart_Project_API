@@ -477,3 +477,74 @@ def test_finished_runs_multiple_accumulate_between_polls(job_client):
     # Second poll: cursor advanced → nothing new.
     resp2 = job_client.get("/jobs/pipelines/finished")
     assert resp2.json()["runs"] == []
+
+
+# ── Atomic writes into the synced project tree ────────────────────────────────
+
+def test_atomic_write_replaces_inode_without_truncating(tmp_path):
+    """A reader holding an open fd must keep seeing the complete old content.
+
+    This is the property that protects the S3 uploader: it declares
+    Content-Length from a stat, then streams the file. A truncate-then-write
+    would make that stream come up short and the connection would be closed
+    mid-PUT; os.replace() swaps the inode instead, so an in-flight read is
+    unaffected.
+    """
+    from app.services.job_service import _atomic_write_text
+
+    target = tmp_path / "_provenance.json"
+    target.write_text("OLD-CONTENT")
+
+    with target.open("rb") as in_flight:
+        _atomic_write_text(target, "NEW")
+        # The already-open descriptor still sees the whole previous version.
+        assert in_flight.read() == b"OLD-CONTENT"
+
+    # A fresh read sees the new version, and no staging file is left behind.
+    assert target.read_text() == "NEW"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_cleans_up_temp_on_failure(tmp_path, monkeypatch):
+    """A failed rename must not leave a staging file in the synced tree."""
+    from app.services import job_service
+
+    target = tmp_path / "metadata.json"
+    target.write_text("{}")
+
+    def _boom(self, _dest):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(job_service.Path, "replace", _boom)
+
+    with pytest.raises(OSError):
+        job_service._atomic_write_text(target, "new")
+
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert target.read_text() == "{}"   # original untouched
+
+
+def test_save_metadata_and_provenance_leave_no_temp_files(tmp_path):
+    """Both synced-tree writers go through the atomic path."""
+    from app.services import job_service
+
+    job_service._save_metadata(tmp_path, {"key": {"status": "success"}})
+    meta = tmp_path / "_working" / "metadata.json"
+    assert json.loads(meta.read_text())["key"]["status"] == "success"
+
+    outdir = tmp_path / "dlmuse_vol"
+    job_service._write_provenance(
+        resolved_outputs={"dlmuse_vol": str(outdir)},
+        step_id="run_nichart_dlmuse",
+        pipeline_id="run_dlmuse",
+        container_image="cbica/nichart_dlmuse:1.0.10-wrapped",
+        params={},
+        input_paths={"t1_img": str(tmp_path / "t1")},
+        submitted_at=None,
+        finished_at=None,
+    )
+    prov = outdir / "_provenance.json"
+    assert json.loads(prov.read_text())["step_id"] == "run_nichart_dlmuse"
+
+    # No staging files anywhere under the project tree.
+    assert list(tmp_path.rglob("*.tmp")) == []

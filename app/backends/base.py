@@ -24,6 +24,20 @@ class MountSpec:
     mount_type: str = "directory"
 
 
+@dataclass(frozen=True)
+class ContentRule:
+    """One expected-content rule for a tool slot, normalised from the YAML.
+
+    ``pattern`` is a file name relative to a directory slot, where ``{MRID}``
+    stands for a subject ID and everything else is matched as a glob. It is
+    ``None`` for a file slot, where the rule describes the slot's own file and
+    only ``csv_columns`` is meaningful.
+    """
+    pattern: str | None
+    per_subject: bool = False
+    csv_columns: tuple[str, ...] | None = None
+
+
 @dataclass
 class ToolSpec:
     """
@@ -41,6 +55,10 @@ class ToolSpec:
     parameters: dict[str, Any] = field(default_factory=dict)  # raw spec dicts from YAML
     resources: dict[str, Any] = field(default_factory=dict)   # vcpus, memory, gpus
     time_per_subject_seconds: float | None = None
+    # One-off cost per invocation regardless of cohort size: container pull/start,
+    # model loading, R/Python interpreter warm-up. For tools dominated by startup
+    # rather than per-subject work, this is the only honest way to describe them.
+    fixed_seconds: float | None = None
     # Singularity invocation mode for this tool.
     # "run"  → apptainer run  sif <args>    (command template is args to the container entrypoint)
     # "exec" → apptainer exec sif <cmd>     (command template begins with the executable)
@@ -58,6 +76,14 @@ class ToolSpec:
     # "directory_union_csv_concat" — same, but CSVs with matching names are row-concatenated
     # "csv_concat"                 — concatenate a single CSV file output (header once, rows appended)
     output_merge: dict[str, str] = field(default_factory=dict)
+
+    # ── Declared slot contents ────────────────────────────────────────────────
+    # What each slot is expected to hold, keyed by slot label. Used to validate
+    # a directory populated by something other than this tool (a manual
+    # intermediate upload) against the naming the tool actually produces or
+    # requires. Absent labels declare nothing, which keeps prior behaviour.
+    input_contents: dict[str, list[ContentRule]] = field(default_factory=dict)
+    output_contents: dict[str, list[ContentRule]] = field(default_factory=dict)
 
     # ── Metadata ──────────────────────────────────────────────────────────────
     github_url: str | None = None

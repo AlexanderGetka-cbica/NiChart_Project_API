@@ -23,6 +23,7 @@ from app.routers.cloud import router as cloud_router
 from app.routers.dicom import router as dicom_router
 from app.routers.docs import router as docs_router
 from app.routers.files import router as files_router
+from app.routers.intermediate import router as intermediate_router
 from app.routers.jobs import jobs_router, project_router as jobs_project_router
 from app.routers.projects import router as projects_router
 from app.routers.results import router as results_router
@@ -220,6 +221,10 @@ def create_app() -> FastAPI:
     app.include_router(results_router)
 
     settings = get_settings()
+    # Mounted conditionally: when the feature is off these paths 404, which is
+    # how a client discovers that a deployment has disabled it.
+    if settings.enable_intermediate_uploads:
+        app.include_router(intermediate_router)
     if settings.enable_test_endpoints:
         app.include_router(test_router)
 

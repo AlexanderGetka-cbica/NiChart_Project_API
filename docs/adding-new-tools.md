@@ -68,7 +68,15 @@ resources:
   memory: 8000         # MiB
   gpus: 0              # Set to 1 for GPU tools.
 
-time_per_subject_seconds: 60    # Seconds per subject; null for batch tools.
+time_per_subject_seconds: 60    # Seconds per subject; null when cost doesn't scale with cohort size.
+fixed_seconds: 10               # Optional. One-off seconds per invocation regardless of cohort
+                                # size: container start, model loading, interpreter warm-up.
+                                # A run estimate is fixed_seconds + time_per_subject_seconds x subjects,
+                                # each treated as 0 when absent. Declare at least one of the two, or
+                                # the planner reports the step as having no timing at all.
+                                # Measure it with two cohort sizes and solve for the slope and
+                                # intercept — guessing a per-subject number for a startup-dominated
+                                # tool makes long-cohort estimates badly wrong.
 
 container:
   image: your-registry/your-image:tag

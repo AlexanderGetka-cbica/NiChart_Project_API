@@ -62,6 +62,8 @@ def _load_label_map(
 
     CSV format (no header): label_id, display_name, constituent_id1, constituent_id2, ...
     Trailing empty cells (from variable-length rows) are ignored.
+    The column name is column_template with ``{id}`` -> label_id and ``{name}`` ->
+    display_name (the latter for atlases whose CSV columns are ROI names, e.g. SynthSeg).
     Only entries whose constructed column name exists in csv_columns are included.
     """
     mapping_file = resources_path / label_map_rel
@@ -87,7 +89,7 @@ def _load_label_map(
                 if not constituents:
                     constituents = [label_id]
 
-                col_name = column_template.replace("{id}", str(label_id))
+                col_name = column_template.replace("{id}", str(label_id)).replace("{name}", display_name)
                 if col_name in csv_columns:
                     result[col_name] = LabelInfo(
                         display_name=display_name,

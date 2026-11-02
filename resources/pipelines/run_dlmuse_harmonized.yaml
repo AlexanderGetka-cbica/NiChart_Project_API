@@ -27,9 +27,20 @@ requires:
       - name: Sex
         type: categorical
         values: [M, F]
+      - name: DX
+        type: string
   - min_subjects:
-      required: 3
+      required: 30
       recommended: 30
+      # Per-cohort minimums. Each entry counts subjects that have imaging AND a
+      # participants.csv row matching every condition under `where`; conditions
+      # combine with AND. String matches are case-insensitive. `required` /
+      # `recommended` default to the parent values above.
+      constraints:
+        - label: Cognitively normal controls
+          where:
+            - column: DX
+              equals: CN
 
 steps:
   - id: run_nichart_dlmuse

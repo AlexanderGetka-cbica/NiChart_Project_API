@@ -17,6 +17,20 @@ The filename stem (`<pipeline_id>`) is the identifier used in API paths and in
 pipeline_name: string     # Human-readable display name shown in the UI.
 description: |            # Multi-line description. Rendered in the pipeline catalog.
   ...
+docs_id: <docs_id>        # Optional. Key into resources/docs/<docs_id>/ for long-form
+                          # documentation. Several pipelines may share one docs_id.
+root_pipeline: <id>       # Optional. Groups variants of one conceptual pipeline under a
+                          # shared key, so a client can present them as one entry with a
+                          # harmonized/standard toggle rather than as separate cards.
+
+# ── Input notes ───────────────────────────────────────────────────────────────
+# Optional. Short user-facing warnings about input requirements that the
+# readiness check cannot verify — e.g. that a pipeline needs raw T1s rather than
+# skull-stripped or registered ones, which is indistinguishable on disk.
+# A list of plain-text sentences, shown verbatim in the UI (no Markdown or HTML).
+# Omit the key entirely when there is nothing to say; the API then returns [].
+input_notes:
+  - "Upload raw (unprocessed) T1 images — not skull-stripped, bias-corrected or registered T1s."
 
 # ── Variant cross-references ──────────────────────────────────────────────────
 # Link harmonized and base versions of the same conceptual pipeline.
@@ -77,6 +91,31 @@ requires:
       required: 3          # Pipeline will refuse to run below this count.
       recommended: 30      # UI shows a warning below this count but still allows submission.
 
+      # Optional per-cohort minimums, e.g. "at least 30 subjects with DX == CN".
+      # Each entry counts subjects that have imaging AND a participants.csv row
+      # satisfying every condition under `where`; a subject missing either side
+      # is not counted. Conditions combine with AND — use `in` for alternatives.
+      # String comparisons are case-insensitive and whitespace-stripped; numeric
+      # bounds are inclusive. An empty cell never matches.
+      # `required`/`recommended` default to the parent values above, and
+      # `recommended` additionally defaults to this constraint's own `required`.
+      # Evaluated per cohort by GET /projects/{id}/readiness/{pipeline_id}, and
+      # declared (with defaults resolved) by GET /catalog/pipelines/{id}.
+      # A condition naming a column participants.csv lacks is reported as
+      # unevaluable, which is distinct from a genuine count of zero.
+      constraints:
+        - label: Cognitively normal controls   # Optional. Shown in the UI.
+          required: 30                         # Optional. Defaults to the parent's.
+          recommended: 30                      # Optional. Defaults to this `required`.
+          where:
+            - column: DX
+              equals: CN                       # Exact value, case-insensitive.
+            - column: Age
+              min: 60                          # Inclusive numeric bounds.
+              max: 90
+            - column: Sex
+              in: [M, F]                       # Any one of these values.
+
 # ── User-overridable parameters ───────────────────────────────────────────────
 # Parameters that the user can supply at submit time via the `params` request body.
 # Omit the section (or use {}) if the pipeline has no user-facing parameters.
@@ -97,11 +136,24 @@ steps:
   - id: step_id             # Unique within this pipeline. Used in cross-step references.
     tool: <tool_id>         # Basename of a file in resources/tools/ (without .yaml).
 
+    # Optional display metadata for clients that list steps (for example a
+    # "start from step" picker). Each falls back to the invoked tool's own `name`
+    # / `description`, then to null — never to the raw step id, so a client can
+    # choose its own fallback. Set these when the tool's name reads poorly in the
+    # context of this particular pipeline.
+    name: string            # Optional.
+    description: string     # Optional.
+
     # Input slot assignments. Keys must match slot labels declared in the tool's
     # `inputs` section. Values are either:
     #   ${STUDY}/...           — absolute path within the project directory.
-    #   ${<step_id>.outputs.<slot>} — output of a previous step (not yet implemented;
-    #                               use ${STUDY}/... paths matched to the prior step's output).
+    #   ${<step_id>.outputs.<slot>} — the resolved output of an earlier step. This IS
+    #                               supported (_resolve_path / _STEP_REF_RE in
+    #                               job_service), but no bundled pipeline uses it:
+    #                               explicit ${STUDY}/... paths are preferred because
+    #                               they stay readable to clients and keep "start from
+    #                               step" predictable, since every step's inputs are
+    #                               then plain paths a user can place by hand.
     inputs:
       <slot_label>: ${STUDY}/path/to/input
 
@@ -224,10 +276,33 @@ params, and finish time.
 
 A step is skipped (cache hit) when:
 - Its cache key `MD5(tool_id | json(inputs) | json(params))` matches a prior run, AND
-- All input paths have modification times earlier than the prior `finished_time`.
+- All input paths have modification times earlier than the prior `finished_time`, AND
+- All of its declared output paths still exist, AND
+- None of its outputs has been replaced by a manual intermediate upload since
+  `finished_time`.
 
 Cache reuse can be disabled per-submission via `reuse_cached_steps: false` in the
 submit request body.
+
+### Manual intermediate uploads and the cache
+
+A user who already holds part of a pipeline's results can supply a later step's
+inputs by hand (`POST /projects/{id}/files/upload/intermediate`) and start the run
+from that step. Such an upload is recorded in
+`{study}/_working/manual_uploads.json`.
+
+That record is the last condition above. A step whose output was written by hand
+did not produce what is now on disk, so reusing its cached result would adopt the
+uploaded files as that step's own output. Two mechanisms enforce this:
+
+- the upload drops any cache entry whose recorded outputs overlap the slot, so a
+  normal full run re-runs the producing step; and
+- the cache verdict itself rejects any entry — including one written before cache
+  records carried output paths — whose outputs a recorded upload has since replaced.
+
+Each cache entry therefore records `tool_id` and its resolved inputs and outputs
+alongside the key. Entries written before that was added still work; they simply
+cannot be matched by path, which is why the second mechanism exists.
 
 ---
 

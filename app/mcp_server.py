@@ -40,8 +40,11 @@ def _api(method: str, path: str, **kwargs) -> Any:
         r = httpx.request(method, f"{_BASE_URL}{path}", timeout=120, **kwargs)
     except httpx.HTTPError as exc:
         raise RuntimeError(
-            f"Cannot reach the NiChart API at {_BASE_URL}: {exc}. "
-            "Is the server running? (Start it, or point --url at it.)"
+            f"Cannot reach the NiChart server at {_BASE_URL}: {exc}. "
+            "If you're using NiChart Desktop, tell the user to open the NiChart "
+            "Desktop app and make sure it's running (it should start the server "
+            "automatically — if not, click Start on the Dashboard), then try again. "
+            "If running standalone, start the NiChart API server or point --url at it."
         )
     if r.status_code >= 400:
         try:
@@ -328,6 +331,24 @@ def get_results(project: str, pipeline_id: str) -> dict:
 
 _TOOLS = (list_pipelines, check_readiness, run_pipeline, get_run_status, get_results)
 
+# Server-level MCP "instructions" — ambient context the host surfaces to the model
+# about this server as a whole, independent of any single tool call or error. Most
+# desktop/local invocations are launched by the NiChart Desktop app's own launcher
+# script, which already starts the server if it isn't running — so most of the time
+# nothing here is even needed. This exists for the remaining cases: Docker itself isn't
+# running, something's broken, or a tool call fails mid-conversation after a successful
+# start. In those cases the model should know what these tools actually are and what to
+# tell the user, rather than surfacing a raw connection error.
+_INSTRUCTIONS = (
+    "These tools control a NiChart instance running locally via the NiChart Desktop "
+    "app's Docker container. The server is normally started automatically when a tool "
+    "here is first used — you shouldn't usually need to do anything about it. If a "
+    "tool call fails because the server is unreachable (the error will say so "
+    "explicitly), tell the user to open the NiChart Desktop app and make sure it's "
+    "running (Dashboard → Start), then retry the request — do not just report a "
+    "raw connection error without that actionable next step."
+)
+
 
 def _build_server(host: str = "127.0.0.1", port: int = 8765):
     """Construct the FastMCP server with the tools registered. Requires the MCP SDK.
@@ -337,7 +358,7 @@ def _build_server(host: str = "127.0.0.1", port: int = 8765):
     """
     from mcp.server.fastmcp import FastMCP  # imported lazily so tests/CLI don't need it
 
-    server = FastMCP("NiChart", host=host, port=port)
+    server = FastMCP("NiChart", instructions=_INSTRUCTIONS, host=host, port=port)
     for fn in _TOOLS:
         server.tool()(fn)
     return server

@@ -66,3 +66,13 @@ surrealgan-scores:
   type: csv
   desc: SurrealGAN brain subtype scores (5 components)
   file: ml-biomarkers/SurrealGAN_RScores.csv
+
+synthseg-seg:
+  type: img
+  desc: SynthSeg segmentation images
+  file: synthseg_seg/{mrid}_synthseg.nii.gz
+
+synthseg-vol:
+  type: csv
+  desc: SynthSeg brain region volumes (92 ROIs)
+  file: synthseg_vol/volumes.csv

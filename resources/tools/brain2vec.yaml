@@ -10,13 +10,14 @@ github_url: https://github.com/CBICA/Brain2Vec
 inputs:
   t1_img:
     type: directory
-    description: Directory of T1-weighted MRI scans, one {MRID}.nii.gz per subject.
+    description: Directory of skull-stripped, template-aligned T1 scans produced by the pipeline's preprocessing steps (DLMUSE -> binarize -> align). Brain2Vec is trained on this representation; feeding raw T1s degrades results.
 
 outputs:
   out_csv:
     type: file
     description: CSV of Brain2Vec embeddings; columns are MRID, feature_0000 … feature_0767.
     merge: csv_concat
+    csv_columns: [MRID]
 
 mounts:
   t1_img:
@@ -33,7 +34,13 @@ resources:
   memory: 6000    # MiB — observed ~3.2 GB peak on 3-subject batch; 6 GB adds margin
   gpus: 1         # peak GPU VRAM ~6 GB (GTX 1080 Ti benchmark, 3 subjects)
 
-time_per_subject_seconds: 15.0   # ~39 s wall time / 3 subjects includes model-load startup
+# Measured 2026-10-27 on cbica/nichart_brain2vec:1.0.3-wrapped (GTX 1080 Ti),
+# IXI subjects, two cohort sizes: 14 s at N=5 and 23 s at N=30 => ~12 s fixed plus
+# ~0.36 s/subject. Dominated by container start, CUDA init and loading the ViT
+# weights. The previous value (15 s/subject, taken from a 3-subject wall time that
+# was almost all startup) overestimated a 30-subject run by ~20x.
+fixed_seconds: 12
+time_per_subject_seconds: 0.36
 
 # Re-enable when parallelization is tested working
 #parallelizable: true
@@ -41,4 +48,6 @@ time_per_subject_seconds: 15.0   # ~39 s wall time / 3 subjects includes model-l
 
 container:
   image: cbica/nichart_brain2vec:1.0.2-wrapped
+  # Apptainer/Singularity: entrypoint run_wrapper.sh dispatches on the first arg ('brain2vec').
+  singularity_run_mode: run
   command: "brain2vec {t1_img} {out_csv}"

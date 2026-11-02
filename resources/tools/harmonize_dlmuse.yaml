@@ -4,12 +4,18 @@ description: Harmonizes DLMUSE ROI volumes to a large reference dataset using Co
 inputs:
   dlmuse_vol_unharmonized:
     type: file
+    # Required by the container's wrapper, which fails fast without them.
+    csv_columns: [MRID, DL_MUSE_Volume_702]
   covariate_csv:
     type: file
+    csv_columns: [MRID, Age, Sex]
 
 outputs:
   dlmuse_vol_harmonized:
     type: directory
+    contents:
+      - pattern: "DLMUSE_Volumes.csv"
+        csv_columns: [MRID]
 
 mounts:
   dlmuse_vol_unharmonized:
@@ -29,8 +35,13 @@ resources:
   memory: 14000
   gpus: 0
 
-time_per_subject_seconds: null
+# Measured 2026-10-23 on cbica/combatfam_harmonize_dlmuse:0.0.1 (which now includes
+# the harmonization QC assessment), POINTER cohort, two sizes: 60.1 s at N=50 and
+# 80.3 s at N=2485 => ~60 s fixed + ~0.008 s/subject. Overwhelmingly container
+# start, R warm-up and loading the reference ComBat model.
+fixed_seconds: 60
+time_per_subject_seconds: 0.008
 
 container:
-  image: cbica/combatfam_harmonize_dlmuse:0.0.2
+  image: cbica/combatfam_harmonize_dlmuse:0.0.1
   command: -i {dlmuse_vol_unharmonized} -c {covariate_csv} -o {dlmuse_vol_harmonized}

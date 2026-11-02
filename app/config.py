@@ -185,6 +185,36 @@ class Settings(BaseSettings):
         ),
     )
 
+    enable_intermediate_uploads: bool = Field(
+        default=True,
+        description=(
+            "Allow manual upload of intermediate pipeline data, so a user who "
+            "already holds partly-processed results can start a pipeline from a "
+            "later step. An advanced, unsupported workflow: the uploaded data "
+            "is taken on trust beyond the declared content checks. When false "
+            "the routes are not mounted at all and return 404, which is how a "
+            "client detects that a deployment has turned the feature off."
+        ),
+    )
+
+    max_upload_file_mb: int = Field(
+        default=1024,
+        description=(
+            "Largest single file accepted by an intermediate upload, in MiB. "
+            "A file over the limit is rejected individually; the rest of the "
+            "request still proceeds."
+        ),
+    )
+
+    max_upload_request_mb: int = Field(
+        default=10240,
+        description=(
+            "Largest total payload accepted by one intermediate upload request, "
+            "in MiB. Exceeding it fails the whole request, since a partially "
+            "written slot is worse than none."
+        ),
+    )
+
     inactivity_timeout_seconds: int = Field(
         default=0,
         description=(

@@ -14,6 +14,12 @@ inputs:
 outputs:
   registered:
     type: directory
+    # Matches results.per_subject in run_fireants_mni_registration.yaml.
+    contents:
+      - pattern: "{MRID}_warped.nii.gz"
+        per_subject: true
+      - pattern: "{MRID}_0Warp.nii.gz"
+        per_subject: true
 
 mounts:
   moving_img:
@@ -41,7 +47,9 @@ time_per_subject_seconds: null
 
 container:
   image: cbica/fireants-wrapped:0.0.1
-  command: >
+  # Apptainer/Singularity: same wrapper shape as nichart_ravens_toolkit (python entrypoint + script path).
+  singularity_run_mode: run
+  command: >-
     /opt/nichart/run_wrapper.py
     --moving-dir {moving_img}
     --output-dir {registered}
